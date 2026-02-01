@@ -8,7 +8,7 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResult>, String> {
     let mut results = Vec::new();
     
     // 检查 OpenClaw 是否安装
-    let openclaw_installed = shell::command_exists("openclaw");
+    let openclaw_installed = shell::get_openclaw_path().is_some();
     results.push(DiagnosticResult {
         name: "OpenClaw 安装".to_string(),
         passed: openclaw_installed,
@@ -77,7 +77,7 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResult>, String> {
     
     // 运行 openclaw doctor
     if openclaw_installed {
-        let doctor_result = shell::run_bash_output("source ~/.openclaw/env 2>/dev/null; openclaw doctor 2>&1 | head -20");
+        let doctor_result = shell::run_openclaw(&["doctor"]);
         results.push(DiagnosticResult {
             name: "OpenClaw Doctor".to_string(),
             passed: doctor_result.is_ok() && !doctor_result.as_ref().unwrap().contains("invalid"),
@@ -92,15 +92,11 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResult>, String> {
 /// 测试 AI 连接
 #[command]
 pub async fn test_ai_connection() -> Result<AITestResult, String> {
-    let env_path = platform::get_env_file_path();
-    
     // 获取当前配置的 provider
     let start = std::time::Instant::now();
     
-    let result = shell::run_bash_output(&format!(
-        "source {} 2>/dev/null; openclaw agent --local --to '+1234567890' --message '回复 OK' 2>&1 | head -10",
-        env_path
-    ));
+    // 使用 openclaw 命令测试连接
+    let result = shell::run_openclaw(&["agent", "--local", "--to", "+1234567890", "--message", "回复 OK"]);
     
     let latency = start.elapsed().as_millis() as u64;
     
@@ -640,19 +636,14 @@ pub async fn get_system_info() -> Result<SystemInfo, String> {
 /// 启动渠道登录（如 WhatsApp 扫码）
 #[command]
 pub async fn start_channel_login(channel_type: String) -> Result<String, String> {
-    let env_path = platform::get_env_file_path();
-    
     match channel_type.as_str() {
         "whatsapp" => {
             // 先在后台启用插件
-            let enable_cmd = format!(
-                "source {} 2>/dev/null; openclaw plugins enable whatsapp 2>/dev/null",
-                env_path
-            );
-            let _ = shell::run_bash_output(&enable_cmd);
+            let _ = shell::run_openclaw(&["plugins", "enable", "whatsapp"]);
             
             #[cfg(target_os = "macos")]
             {
+                let env_path = platform::get_env_file_path();
                 // 创建一个临时脚本文件
                 // 流程：1. 启用插件 2. 重启 Gateway 3. 登录
                 let script_content = format!(
@@ -750,6 +741,7 @@ read -p "按回车键关闭此窗口..."
             
             #[cfg(target_os = "linux")]
             {
+                let env_path = platform::get_env_file_path();
                 // 创建脚本
                 let script_content = format!(
                     r#"#!/bin/bash

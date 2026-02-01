@@ -24,10 +24,17 @@ interface EnvironmentStatus {
   os: string;
 }
 
+interface ServiceStatus {
+  running: boolean;
+  pid: number | null;
+  port: number;
+}
+
 function App() {
   const [currentPage, setCurrentPage] = useState<PageType>('dashboard');
   const [isReady, setIsReady] = useState<boolean | null>(null);
   const [showSetup, setShowSetup] = useState(false);
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
 
   // 检查环境
   useEffect(() => {
@@ -44,6 +51,21 @@ function App() {
       }
     };
     checkEnv();
+  }, []);
+
+  // 定期获取服务状态
+  useEffect(() => {
+    const fetchServiceStatus = async () => {
+      try {
+        const status = await invoke<ServiceStatus>('get_service_status');
+        setServiceStatus(status);
+      } catch (e) {
+        console.error('获取服务状态失败:', e);
+      }
+    };
+    fetchServiceStatus();
+    const interval = setInterval(fetchServiceStatus, 3000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleSetupComplete = () => {
@@ -111,7 +133,7 @@ function App() {
       <div className="fixed inset-0 bg-gradient-radial pointer-events-none" />
       
       {/* 侧边栏 */}
-      <Sidebar currentPage={currentPage} onNavigate={setCurrentPage} />
+      <Sidebar currentPage={currentPage} onNavigate={setCurrentPage} serviceStatus={serviceStatus} />
       
       {/* 主内容区 */}
       <div className="flex-1 flex flex-col overflow-hidden">

@@ -13,7 +13,11 @@ pub fn get_arch() -> String {
 /// 获取配置目录路径
 pub fn get_config_dir() -> String {
     if let Some(home) = dirs::home_dir() {
-        format!("{}/.openclaw", home.display())
+        if is_windows() {
+            format!("{}\\.openclaw", home.display())
+        } else {
+            format!("{}/.openclaw", home.display())
+        }
     } else {
         String::from("~/.openclaw")
     }
@@ -21,17 +25,29 @@ pub fn get_config_dir() -> String {
 
 /// 获取环境变量文件路径
 pub fn get_env_file_path() -> String {
-    format!("{}/env", get_config_dir())
+    if is_windows() {
+        format!("{}\\env", get_config_dir())
+    } else {
+        format!("{}/env", get_config_dir())
+    }
 }
 
 /// 获取 openclaw.json 配置文件路径
 pub fn get_config_file_path() -> String {
-    format!("{}/openclaw.json", get_config_dir())
+    if is_windows() {
+        format!("{}\\openclaw.json", get_config_dir())
+    } else {
+        format!("{}/openclaw.json", get_config_dir())
+    }
 }
 
 /// 获取日志文件路径
 pub fn get_log_file_path() -> String {
-    String::from("/tmp/openclaw-gateway.log")
+    if is_windows() {
+        format!("{}\\openclaw-gateway.log", get_config_dir())
+    } else {
+        String::from("/tmp/openclaw-gateway.log")
+    }
 }
 
 /// 检测当前平台是否为 macOS

@@ -10,9 +10,16 @@ import {
 import { PageType } from '../../App';
 import clsx from 'clsx';
 
+interface ServiceStatus {
+  running: boolean;
+  pid: number | null;
+  port: number;
+}
+
 interface SidebarProps {
   currentPage: PageType;
   onNavigate: (page: PageType) => void;
+  serviceStatus: ServiceStatus | null;
 }
 
 const menuItems: { id: PageType; label: string; icon: React.ElementType }[] = [
@@ -24,7 +31,8 @@ const menuItems: { id: PageType; label: string; icon: React.ElementType }[] = [
   { id: 'settings', label: '设置', icon: Settings },
 ];
 
-export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
+export function Sidebar({ currentPage, onNavigate, serviceStatus }: SidebarProps) {
+  const isRunning = serviceStatus?.running ?? false;
   return (
     <aside className="w-64 bg-dark-800 border-r border-dark-600 flex flex-col">
       {/* Logo 区域（macOS 标题栏拖拽） */}
@@ -78,10 +86,12 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
       <div className="p-4 border-t border-dark-600">
         <div className="px-4 py-3 bg-dark-700 rounded-lg">
           <div className="flex items-center gap-2 mb-2">
-            <div className="status-dot running" />
-            <span className="text-xs text-gray-400">服务运行中</span>
+            <div className={clsx('status-dot', isRunning ? 'running' : 'stopped')} />
+            <span className="text-xs text-gray-400">
+              {isRunning ? '服务运行中' : '服务未启动'}
+            </span>
           </div>
-          <p className="text-xs text-gray-500">端口: 18789</p>
+          <p className="text-xs text-gray-500">端口: {serviceStatus?.port ?? 18789}</p>
         </div>
       </div>
     </aside>
