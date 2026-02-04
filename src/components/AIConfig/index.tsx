@@ -132,6 +132,8 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
   });
   const [customModelId, setCustomModelId] = useState('');
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [showCustomUrlWarning, setShowCustomUrlWarning] = useState(false);
 
   // 检查是否是官方 Provider 名字但使用了自定义地址
   const isCustomUrlWithOfficialName = (() => {
@@ -150,6 +152,8 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
     // 预选推荐模型
     const recommended = provider.suggested_models.filter(m => m.recommended).map(m => m.id);
     setSelectedModels(recommended.length > 0 ? recommended : [provider.suggested_models[0]?.id].filter(Boolean));
+    setFormError(null);
+    setShowCustomUrlWarning(false);
     setStep('configure');
   };
 
@@ -159,10 +163,13 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
     setBaseUrl('');
     setApiType('openai-completions');
     setSelectedModels([]);
+    setFormError(null);
+    setShowCustomUrlWarning(false);
     setStep('configure');
   };
 
   const toggleModel = (modelId: string) => {
+    setFormError(null);
     setSelectedModels(prev => 
       prev.includes(modelId) 
         ? prev.filter(id => id !== modelId)
@@ -172,6 +179,7 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
 
   const addCustomModel = () => {
     if (customModelId && !selectedModels.includes(customModelId)) {
+      setFormError(null);
       setSelectedModels(prev => [...prev, customModelId]);
       setCustomModelId('');
     }
@@ -191,26 +199,22 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
     }
   };
 
-  const handleSave = async () => {
+  const handleSave = async (forceOverride: boolean = false) => {
+    setFormError(null);
+    
     if (!providerName || !baseUrl || selectedModels.length === 0) {
-      alert('请填写完整的 Provider 信息和至少选择一个模型');
+      setFormError('请填写完整的 Provider 信息和至少选择一个模型');
       return;
     }
 
     // 如果使用官方名字但自定义了地址，给出警告
-    if (isCustomUrlWithOfficialName) {
-      const confirmed = confirm(
-        `您使用的是官方 Provider 名称 "${providerName}"，但修改了 API 地址。\n\n` +
-        `这可能导致配置被 OpenClaw 内置设置覆盖。\n\n` +
-        `建议使用不同的名称，如 "${suggestedName}"。\n\n` +
-        `是否仍要使用当前名称保存？`
-      );
-      if (!confirmed) {
-        return;
-      }
+    if (isCustomUrlWithOfficialName && !forceOverride) {
+      setShowCustomUrlWarning(true);
+      return;
     }
     
     setSaving(true);
+    setShowCustomUrlWarning(false);
     try {
       // 构建模型配置
       const models: ModelConfig[] = selectedModels.map(modelId => {
@@ -242,7 +246,7 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
       onClose();
     } catch (e) {
       aiLogger.error('保存 Provider 失败', e);
-      alert('保存失败: ' + e);
+      setFormError('保存失败: ' + String(e));
     } finally {
       setSaving(false);
     }
@@ -338,7 +342,7 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
                   <input
                     type="text"
                     value={providerName}
-                    onChange={e => setProviderName(e.target.value)}
+                    onChange={e => { setFormError(null); setProviderName(e.target.value); }}
                     placeholder="如: anthropic-custom, my-openai"
                     className={clsx(
                       'input-base',
@@ -373,7 +377,7 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
                   <input
                     type="text"
                     value={baseUrl}
-                    onChange={e => setBaseUrl(e.target.value)}
+                    onChange={e => { setFormError(null); setBaseUrl(e.target.value); }}
                     placeholder="https://api.example.com/v1"
                     className="input-base"
                   />
@@ -534,6 +538,57 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
                     查看官方文档
                   </a>
                 )}
+
+                {/* 表单错误提示 */}
+                {formError && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg"
+                  >
+                    <p className="text-red-400 text-sm flex items-center gap-2">
+                      <XCircle size={16} />
+                      {formError}
+                    </p>
+                  </motion.div>
+                )}
+
+                {/* 自定义 URL 警告对话框 */}
+                {showCustomUrlWarning && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg space-y-3"
+                  >
+                    <p className="text-yellow-400 text-sm">
+                      ⚠️ 您使用的是官方 Provider 名称 "{providerName}"，但修改了 API 地址。
+                      这可能导致配置被 OpenClaw 内置设置覆盖。
+                    </p>
+                    <p className="text-yellow-300 text-sm">
+                      建议使用不同的名称，如 "{suggestedName}"
+                    </p>
+                    <div className="flex gap-2 pt-2">
+                      <button
+                        onClick={handleApplySuggestedName}
+                        className="btn-secondary text-sm py-2 px-3"
+                      >
+                        使用建议名称
+                      </button>
+                      <button
+                        onClick={() => handleSave(true)}
+                        className="btn-primary text-sm py-2 px-3"
+                      >
+                        仍然保存
+                      </button>
+                      <button
+                        onClick={() => setShowCustomUrlWarning(false)}
+                        className="text-sm text-gray-400 hover:text-white px-3"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
               </motion.div>
             )}
           </AnimatePresence>
@@ -554,9 +609,9 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
             <button onClick={onClose} className="btn-secondary">
               取消
             </button>
-            {step === 'configure' && (
+            {step === 'configure' && !showCustomUrlWarning && (
               <button
-                onClick={handleSave}
+                onClick={() => handleSave()}
                 disabled={saving || !providerName || !baseUrl || selectedModels.length === 0}
                 className="btn-primary flex items-center gap-2"
               >
@@ -584,6 +639,8 @@ interface ProviderCardProps {
 function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, onEdit }: ProviderCardProps) {
   const [expanded, setExpanded] = useState(true);
   const [deleting, setDeleting] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // 查找官方 Provider 信息
   const officialInfo = officialProviders.find(p => 
@@ -593,20 +650,28 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
   // 检查是否使用了自定义地址
   const isCustomUrl = officialInfo && officialInfo.default_base_url && provider.base_url !== officialInfo.default_base_url;
 
-  const handleDelete = async () => {
-    if (!confirm(`确定要删除 Provider "${provider.name}" 吗？这将同时删除其下所有模型配置。`)) {
-      return;
-    }
-    
+  const handleDeleteClick = () => {
+    setShowDeleteConfirm(true);
+    setDeleteError(null);
+  };
+
+  const handleDeleteConfirm = async () => {
     setDeleting(true);
+    setDeleteError(null);
     try {
       await invoke('delete_provider', { providerName: provider.name });
+      setShowDeleteConfirm(false);
       onRefresh();
     } catch (e) {
-      alert('删除失败: ' + e);
+      setDeleteError('删除失败: ' + String(e));
     } finally {
       setDeleting(false);
     }
+  };
+
+  const handleDeleteCancel = () => {
+    setShowDeleteConfirm(false);
+    setDeleteError(null);
   };
 
   return (
@@ -707,27 +772,64 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
                 ))}
               </div>
 
+              {/* 删除确认对话框 */}
+              {showDeleteConfirm && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg space-y-3"
+                >
+                  <p className="text-red-400 text-sm">
+                    ⚠️ 确定要删除 Provider "{provider.name}" 吗？这将同时删除其下所有模型配置。
+                  </p>
+                  {deleteError && (
+                    <p className="text-red-300 text-sm bg-red-500/20 p-2 rounded">
+                      {deleteError}
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleDeleteConfirm}
+                      disabled={deleting}
+                      className="btn-primary text-sm py-2 px-3 bg-red-500 hover:bg-red-600 flex items-center gap-1"
+                    >
+                      {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                      确认删除
+                    </button>
+                    <button
+                      onClick={handleDeleteCancel}
+                      disabled={deleting}
+                      className="btn-secondary text-sm py-2 px-3"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+
               {/* 操作按钮 */}
-              <div className="flex justify-end gap-4 pt-2">
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onEdit(provider);
-                  }}
-                  className="flex items-center gap-1 text-sm text-claw-400 hover:text-claw-300 transition-colors"
-                >
-                  <Pencil size={14} />
-                  编辑 Provider
-                </button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  className="flex items-center gap-1 text-sm text-red-400 hover:text-red-300 transition-colors"
-                >
-                  {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-                  删除 Provider
-                </button>
-              </div>
+              {!showDeleteConfirm && (
+                <div className="flex justify-end gap-4 pt-2">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEdit(provider);
+                    }}
+                    className="flex items-center gap-1 text-sm text-claw-400 hover:text-claw-300 transition-colors"
+                  >
+                    <Pencil size={14} />
+                    编辑 Provider
+                  </button>
+                  <button
+                    onClick={handleDeleteClick}
+                    disabled={deleting}
+                    className="flex items-center gap-1 text-sm text-red-400 hover:text-red-300 transition-colors"
+                  >
+                    {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                    删除 Provider
+                  </button>
+                </div>
+              )}
             </div>
           </motion.div>
         )}

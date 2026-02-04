@@ -88,10 +88,32 @@ pub async fn check_environment() -> Result<EnvironmentStatus, String> {
 /// 检测多个可能的安装路径，因为 GUI 应用不继承用户 shell 的 PATH
 fn get_node_version() -> Option<String> {
     if platform::is_windows() {
-        // 使用 cmd.exe 避免 PowerShell 执行策略问题
-        shell::run_cmd_output("node --version")
-            .ok()
-            .map(|v| v.trim().to_string())
+        // Windows: 先尝试直接调用（如果 PATH 已更新）
+        if let Ok(v) = shell::run_cmd_output("node --version") {
+            let version = v.trim().to_string();
+            if !version.is_empty() && version.starts_with('v') {
+                info!("[环境检查] 通过 PATH 找到 Node.js: {}", version);
+                return Some(version);
+            }
+        }
+        
+        // Windows: 检查常见的安装路径
+        let possible_paths = get_windows_node_paths();
+        for path in possible_paths {
+            if std::path::Path::new(&path).exists() {
+                // 使用完整路径执行
+                let cmd = format!("\"{}\" --version", path);
+                if let Ok(output) = shell::run_cmd_output(&cmd) {
+                    let version = output.trim().to_string();
+                    if !version.is_empty() && version.starts_with('v') {
+                        info!("[环境检查] 在 {} 找到 Node.js: {}", path, version);
+                        return Some(version);
+                    }
+                }
+            }
+        }
+        
+        None
     } else {
         // 先尝试直接调用
         if let Ok(v) = shell::run_command_output("node", &["--version"]) {
@@ -164,6 +186,75 @@ fn get_unix_node_paths() -> Vec<String> {
         
         // mise (formerly rtx)
         paths.push(format!("{}/.local/share/mise/shims/node", home_str));
+    }
+    
+    paths
+}
+
+/// 获取 Windows 系统上可能的 Node.js 路径
+fn get_windows_node_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    
+    // 1. 标准安装路径 (Program Files)
+    paths.push("C:\\Program Files\\nodejs\\node.exe".to_string());
+    paths.push("C:\\Program Files (x86)\\nodejs\\node.exe".to_string());
+    
+    // 2. nvm for Windows (nvm4w) - 常见安装位置
+    paths.push("C:\\nvm4w\\nodejs\\node.exe".to_string());
+    
+    // 3. 用户目录下的各种安装
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.display().to_string();
+        
+        // nvm for Windows 用户安装
+        paths.push(format!("{}\\AppData\\Roaming\\nvm\\current\\node.exe", home_str));
+        
+        // fnm (Fast Node Manager) for Windows
+        paths.push(format!("{}\\AppData\\Roaming\\fnm\\aliases\\default\\node.exe", home_str));
+        paths.push(format!("{}\\AppData\\Local\\fnm\\aliases\\default\\node.exe", home_str));
+        paths.push(format!("{}\\.fnm\\aliases\\default\\node.exe", home_str));
+        
+        // volta
+        paths.push(format!("{}\\AppData\\Local\\Volta\\bin\\node.exe", home_str));
+        // volta 通过 shim 调用，检查 bin 目录即可
+        
+        // scoop 安装
+        paths.push(format!("{}\\scoop\\apps\\nodejs\\current\\node.exe", home_str));
+        paths.push(format!("{}\\scoop\\apps\\nodejs-lts\\current\\node.exe", home_str));
+        
+        // chocolatey 安装
+        paths.push("C:\\ProgramData\\chocolatey\\lib\\nodejs\\tools\\node.exe".to_string());
+    }
+    
+    // 4. 从注册表读取的安装路径（通过环境变量间接获取）
+    if let Ok(program_files) = std::env::var("ProgramFiles") {
+        paths.push(format!("{}\\nodejs\\node.exe", program_files));
+    }
+    if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+        paths.push(format!("{}\\nodejs\\node.exe", program_files_x86));
+    }
+    
+    // 5. nvm-windows 的符号链接路径（NVM_SYMLINK 环境变量）
+    if let Ok(nvm_symlink) = std::env::var("NVM_SYMLINK") {
+        paths.insert(0, format!("{}\\node.exe", nvm_symlink));
+    }
+    
+    // 6. nvm-windows 的 NVM_HOME 路径下的当前版本
+    if let Ok(nvm_home) = std::env::var("NVM_HOME") {
+        // 尝试读取当前激活的版本
+        let settings_path = format!("{}\\settings.txt", nvm_home);
+        if let Ok(content) = std::fs::read_to_string(&settings_path) {
+            for line in content.lines() {
+                if line.starts_with("current:") {
+                    if let Some(version) = line.strip_prefix("current:") {
+                        let version = version.trim();
+                        if !version.is_empty() {
+                            paths.insert(0, format!("{}\\v{}\\node.exe", nvm_home, version));
+                        }
+                    }
+                }
+            }
+        }
     }
     
     paths
