@@ -88,7 +88,8 @@ pub async fn check_environment() -> Result<EnvironmentStatus, String> {
 /// 检测多个可能的安装路径，因为 GUI 应用不继承用户 shell 的 PATH
 fn get_node_version() -> Option<String> {
     if platform::is_windows() {
-        shell::run_powershell_output("node --version")
+        // 使用 cmd.exe 避免 PowerShell 执行策略问题
+        shell::run_cmd_output("node --version")
             .ok()
             .map(|v| v.trim().to_string())
     } else {

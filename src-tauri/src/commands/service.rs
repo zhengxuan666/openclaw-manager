@@ -4,6 +4,13 @@ use tauri::command;
 use std::process::Command;
 use log::{info, debug};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// Windows CREATE_NO_WINDOW 标志，用于隐藏控制台窗口
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 const SERVICE_PORT: u16 = 18789;
 
 /// 检测端口是否有服务在监听，返回 PID
@@ -28,10 +35,11 @@ fn check_port_listening(port: u16) -> Option<u32> {
     
     #[cfg(windows)]
     {
-        let output = Command::new("netstat")
-            .args(["-ano"])
-            .output()
-            .ok()?;
+        let mut cmd = Command::new("netstat");
+        cmd.args(["-ano"]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        
+        let output = cmd.output().ok()?;
         
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);

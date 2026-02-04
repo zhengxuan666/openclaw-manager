@@ -134,11 +134,52 @@ pub fn run_bash_output(script: &str) -> Result<String, String> {
     }
 }
 
-/// 执行 PowerShell 命令（Windows）
+/// 执行 cmd.exe 命令（Windows）- 避免 PowerShell 执行策略问题
+pub fn run_cmd(script: &str) -> io::Result<Output> {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/c", script]);
+    
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    
+    cmd.output()
+}
+
+/// 执行 cmd.exe 命令并获取输出（Windows）
+pub fn run_cmd_output(script: &str) -> Result<String, String> {
+    match run_cmd(script) {
+        Ok(output) => {
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if stdout.is_empty() {
+                        Err(format!("Command failed with exit code: {:?}", output.status.code()))
+                    } else {
+                        Err(stdout)
+                    }
+                } else {
+                    Err(stderr)
+                }
+            }
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 执行 PowerShell 命令（Windows）- 仅在需要 PowerShell 特定功能时使用
+/// 注意：某些 Windows 系统的 PowerShell 执行策略可能禁止运行脚本
 pub fn run_powershell(script: &str) -> io::Result<Output> {
-    Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
+    let mut cmd = Command::new("powershell");
+    // 使用 -ExecutionPolicy Bypass 绕过执行策略限制
+    cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]);
+    
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    
+    cmd.output()
 }
 
 /// 执行 PowerShell 命令并获取输出（Windows）
@@ -166,9 +207,10 @@ pub fn run_powershell_output(script: &str) -> Result<String, String> {
 }
 
 /// 跨平台执行脚本命令
+/// Windows 上使用 cmd.exe（避免 PowerShell 执行策略问题）
 pub fn run_script_output(script: &str) -> Result<String, String> {
     if platform::is_windows() {
-        run_powershell_output(script)
+        run_cmd_output(script)
     } else {
         run_bash_output(script)
     }
@@ -177,9 +219,13 @@ pub fn run_script_output(script: &str) -> Result<String, String> {
 /// 后台执行命令（不等待结果）
 pub fn spawn_background(script: &str) -> io::Result<()> {
     if platform::is_windows() {
-        Command::new("powershell")
-            .args(["-NoProfile", "-Command", script])
-            .spawn()?;
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/c", script]);
+        
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        
+        cmd.spawn()?;
     } else {
         Command::new("bash")
             .arg("-c")
@@ -322,17 +368,25 @@ pub fn run_openclaw(args: &[&str]) -> Result<String, String> {
         // Windows: .cmd 文件需要通过 cmd /c 执行
         let mut cmd_args = vec!["/c", &openclaw_path];
         cmd_args.extend(args);
-        Command::new("cmd")
-            .args(&cmd_args)
+        let mut cmd = Command::new("cmd");
+        cmd.args(&cmd_args)
             .env("OPENCLAW_GATEWAY_TOKEN", DEFAULT_GATEWAY_TOKEN)
-            .env("PATH", &extended_path)
-            .output()
+            .env("PATH", &extended_path);
+        
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        
+        cmd.output()
     } else {
-        Command::new(&openclaw_path)
-            .args(args)
+        let mut cmd = Command::new(&openclaw_path);
+        cmd.args(args)
             .env("OPENCLAW_GATEWAY_TOKEN", DEFAULT_GATEWAY_TOKEN)
-            .env("PATH", &extended_path)
-            .output()
+            .env("PATH", &extended_path);
+        
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        
+        cmd.output()
     };
     
     match output {
@@ -437,6 +491,10 @@ pub fn spawn_openclaw_gateway() -> io::Result<()> {
     cmd.env("PATH", &extended_path);
     cmd.env("OPENCLAW_GATEWAY_TOKEN", DEFAULT_GATEWAY_TOKEN);
     
+    // Windows: 隐藏控制台窗口
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    
     info!("[Shell] 启动 gateway 进程...");
     let child = cmd.spawn();
     
@@ -459,9 +517,13 @@ pub fn spawn_openclaw_gateway() -> io::Result<()> {
 pub fn command_exists(cmd: &str) -> bool {
     if platform::is_windows() {
         // Windows: 使用 where 命令
-        Command::new("where")
-            .arg(cmd)
-            .output()
+        let mut command = Command::new("where");
+        command.arg(cmd);
+        
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        
+        command.output()
             .map(|o| o.status.success())
             .unwrap_or(false)
     } else {
