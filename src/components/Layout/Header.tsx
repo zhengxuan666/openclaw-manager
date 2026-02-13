@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { PageType } from '../../App';
 import { RefreshCw, ExternalLink, Loader2 } from 'lucide-react';
-import { open } from '@tauri-apps/plugin-shell';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand as invoke } from '../../lib/invoke';
+import { isTauri } from '../../lib/tauri';
 
 interface HeaderProps {
   currentPage: PageType;
@@ -24,13 +24,27 @@ export function Header({ currentPage }: HeaderProps) {
   const handleOpenDashboard = async () => {
     setOpening(true);
     try {
-      // 获取带 token 的 Dashboard URL（如果没有 token 会自动生成）
-      const url = await invoke<string>('get_dashboard_url');
-      await open(url);
+      if (isTauri()) {
+        const url = await invoke<string>('get_dashboard_url');
+        const { open } = await import('@tauri-apps/plugin-shell');
+        await open(url);
+      } else {
+        const token = await invoke<string>('get_or_create_gateway_token');
+        const baseUrl =
+          import.meta.env.VITE_GATEWAY_BASE_URL ||
+          `${window.location.protocol}//${window.location.hostname}:18789`;
+        window.open(`${baseUrl}?token=${token}`, '_blank');
+      }
     } catch (e) {
       console.error('打开 Dashboard 失败:', e);
-      // 降级方案：使用 window.open（不带 token）
-      window.open('http://localhost:18789', '_blank');
+      if (!isTauri()) {
+        const fallbackBase =
+          import.meta.env.VITE_GATEWAY_BASE_URL ||
+          `${window.location.protocol}//${window.location.hostname}:18789`;
+        window.open(fallbackBase, '_blank');
+      } else {
+        window.open('http://localhost:18789', '_blank');
+      }
     } finally {
       setOpening(false);
     }
@@ -38,13 +52,11 @@ export function Header({ currentPage }: HeaderProps) {
 
   return (
     <header className="h-14 bg-dark-800/50 border-b border-dark-600 flex items-center justify-between px-6 titlebar-drag backdrop-blur-sm">
-      {/* 左侧：页面标题 */}
       <div className="titlebar-no-drag">
         <h2 className="text-lg font-semibold text-white">{title}</h2>
         <p className="text-xs text-gray-500">{description}</p>
       </div>
 
-      {/* 右侧：操作按钮 */}
       <div className="flex items-center gap-2 titlebar-no-drag">
         <button
           onClick={() => window.location.reload()}

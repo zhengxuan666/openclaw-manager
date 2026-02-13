@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from './invoke';
 import { apiLogger } from './logger';
 
 // 检查是否在 Tauri 环境中运行
@@ -8,12 +8,9 @@ export function isTauri(): boolean {
 
 // 带日志的 invoke 封装（自动检查 Tauri 环境）
 async function invokeWithLog<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauri()) {
-    throw new Error('不在 Tauri 环境中运行，请通过 Tauri 应用启动');
-  }
   apiLogger.apiCall(cmd, args);
   try {
-    const result = await invoke<T>(cmd, args);
+    const result = await invokeCommand<T>(cmd, args);
     apiLogger.apiResponse(cmd, result);
     return result;
   } catch (error) {

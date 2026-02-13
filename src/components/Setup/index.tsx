@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand as invoke } from '../../lib/invoke';
 import { 
   CheckCircle2,
   Loader2, 

@@ -11,7 +11,11 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "web:backend": "cd src-tauri && cargo run --bin web-server",
+    "web:frontend": "vite",
+    "web:build": "npm run build && cd src-tauri && cargo build --release --bin web-server",
+    "web:serve": "npm run web:build && cd src-tauri && ./target/release/web-server"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",

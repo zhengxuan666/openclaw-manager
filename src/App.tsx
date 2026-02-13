@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { invoke } from '@tauri-apps/api/core';
+import {
+  invokeCommand as invoke,
+  getWebAuthStatus,
+  loginWebAdmin,
+  setupWebAdmin,
+  logoutWebAdmin,
+} from './lib/invoke';
 import { Sidebar } from './components/Layout/Sidebar';
 import { Header } from './components/Layout/Header';
 import { Dashboard } from './components/Dashboard';
@@ -50,37 +56,55 @@ function App() {
   const [isReady, setIsReady] = useState<boolean | null>(null);
   const [envStatus, setEnvStatus] = useState<EnvironmentStatus | null>(null);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
-  
-  // 更新相关状态
+
+  const webMode = !isTauri();
+  const [authChecked, setAuthChecked] = useState(!webMode);
+  const [needsSetup, setNeedsSetup] = useState(false);
+  const [authenticated, setAuthenticated] = useState(!webMode);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('');
+
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [showUpdateBanner, setShowUpdateBanner] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [updateResult, setUpdateResult] = useState<UpdateResult | null>(null);
 
-  // 检查环境
-  const checkEnvironment = useCallback(async () => {
-    if (!isTauri()) {
-      appLogger.warn('不在 Tauri 环境中，跳过环境检查');
-      setIsReady(true);
+  const refreshAuthStatus = useCallback(async () => {
+    if (!webMode) {
       return;
     }
-    
+
+    try {
+      const status = await getWebAuthStatus();
+      setNeedsSetup(status.needs_setup);
+      setAuthenticated(status.authenticated);
+      if (status.username) {
+        setUsername(status.username);
+      }
+      setAuthChecked(true);
+    } catch (error) {
+      setAuthError(String(error));
+      setAuthChecked(true);
+      setAuthenticated(false);
+    }
+  }, [webMode]);
+
+  const checkEnvironment = useCallback(async () => {
     appLogger.info('开始检查系统环境...');
     try {
       const status = await invoke<EnvironmentStatus>('check_environment');
       appLogger.info('环境检查完成', status);
       setEnvStatus(status);
-      setIsReady(true); // 总是显示主界面
+      setIsReady(true);
     } catch (e) {
       appLogger.error('环境检查失败', e);
       setIsReady(true);
     }
   }, []);
 
-  // 检查更新
   const checkUpdate = useCallback(async () => {
-    if (!isTauri()) return;
-    
     appLogger.info('检查 OpenClaw 更新...');
     try {
       const info = await invoke<UpdateInfo>('check_openclaw_update');
@@ -94,7 +118,6 @@ function App() {
     }
   }, []);
 
-  // 执行更新
   const handleUpdate = async () => {
     setUpdating(true);
     setUpdateResult(null);
@@ -102,9 +125,7 @@ function App() {
       const result = await invoke<UpdateResult>('update_openclaw');
       setUpdateResult(result);
       if (result.success) {
-        // 更新成功后重新检查环境
         await checkEnvironment();
-        // 3秒后关闭提示
         setTimeout(() => {
           setShowUpdateBanner(false);
           setUpdateResult(null);
@@ -123,23 +144,43 @@ function App() {
 
   useEffect(() => {
     appLogger.info('🦞 App 组件已挂载');
-    checkEnvironment();
-  }, [checkEnvironment]);
+    refreshAuthStatus();
+  }, [refreshAuthStatus]);
 
-  // 启动后延迟检查更新（避免阻塞启动）
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!authChecked) {
+      return;
+    }
+
+    if (webMode && !authenticated) {
+      setIsReady(true);
+      return;
+    }
+
+    checkEnvironment();
+  }, [authChecked, authenticated, webMode, checkEnvironment]);
+
+  useEffect(() => {
+    if (!authChecked) {
+      return;
+    }
+
+    if (webMode && !authenticated) {
+      return;
+    }
+
     const timer = setTimeout(() => {
       checkUpdate();
     }, 2000);
-    return () => clearTimeout(timer);
-  }, [checkUpdate]);
 
-  // 定期获取服务状态
+    return () => clearTimeout(timer);
+  }, [checkUpdate, authChecked, authenticated, webMode]);
+
   useEffect(() => {
-    // 不在 Tauri 环境中则不轮询
-    if (!isTauri()) return;
-    
+    if (webMode && !authenticated) {
+      return;
+    }
+
     const fetchServiceStatus = async () => {
       try {
         const status = await invoke<ServiceStatus>('get_service_status');
@@ -148,29 +189,53 @@ function App() {
         // 静默处理轮询错误
       }
     };
+
     fetchServiceStatus();
     const interval = setInterval(fetchServiceStatus, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [webMode, authenticated]);
 
   const handleSetupComplete = useCallback(() => {
     appLogger.info('安装向导完成');
-    checkEnvironment(); // 重新检查环境
+    checkEnvironment();
   }, [checkEnvironment]);
 
-  // 页面切换处理
   const handleNavigate = (page: PageType) => {
     appLogger.action('页面切换', { from: currentPage, to: page });
     setCurrentPage(page);
   };
 
-  const renderPage = () => {
-    const pageVariants = {
-      initial: { opacity: 0, x: 20 },
-      animate: { opacity: 1, x: 0 },
-      exit: { opacity: 0, x: -20 },
-    };
+  const handleAuthSubmit = async () => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      if (needsSetup) {
+        await setupWebAdmin(username, password);
+      } else {
+        await loginWebAdmin(username, password);
+      }
+      setPassword('');
+      await refreshAuthStatus();
+    } catch (error) {
+      setAuthError(String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
 
+  const handleLogout = async () => {
+    try {
+      await logoutWebAdmin();
+    } catch (error) {
+      console.error('退出登录失败', error);
+    } finally {
+      setAuthenticated(false);
+      setNeedsSetup(false);
+      await refreshAuthStatus();
+    }
+  };
+
+  const renderPage = () => {
     const pages: Record<PageType, JSX.Element> = {
       dashboard: <Dashboard envStatus={envStatus} onSetupComplete={handleSetupComplete} />,
       ai: <AIConfig />,
@@ -184,10 +249,9 @@ function App() {
       <AnimatePresence mode="wait">
         <motion.div
           key={currentPage}
-          variants={pageVariants}
-          initial="initial"
-          animate="animate"
-          exit="exit"
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: -20 }}
           transition={{ duration: 0.2 }}
           className="h-full"
         >
@@ -197,8 +261,7 @@ function App() {
     );
   };
 
-  // 正在检查环境
-  if (isReady === null) {
+  if (!authChecked || isReady === null) {
     return (
       <div className="flex h-screen bg-dark-900 items-center justify-center">
         <div className="fixed inset-0 bg-gradient-radial pointer-events-none" />
@@ -212,13 +275,55 @@ function App() {
     );
   }
 
-  // 主界面
+  if (webMode && !authenticated) {
+    return (
+      <div className="flex h-screen bg-dark-900 items-center justify-center px-4">
+        <div className="w-full max-w-md bg-dark-700 rounded-2xl border border-dark-500 p-6 space-y-4">
+          <h2 className="text-white text-xl font-semibold">OpenClaw Manager Web</h2>
+          <p className="text-sm text-gray-400">
+            {needsSetup ? '首次使用，请初始化管理员账号' : '请登录后访问管理后台'}
+          </p>
+
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">用户名</label>
+            <input
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              className="input-base"
+              placeholder="admin"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">密码</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              className="input-base"
+              placeholder="请输入密码"
+            />
+          </div>
+
+          {authError && <p className="text-sm text-red-400">{authError}</p>}
+
+          <button
+            onClick={handleAuthSubmit}
+            disabled={authBusy}
+            className="btn-primary w-full flex items-center justify-center gap-2"
+          >
+            {authBusy ? <Loader2 size={16} className="animate-spin" /> : null}
+            {needsSetup ? '初始化并登录' : '登录'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-dark-900 overflow-hidden">
-      {/* 背景装饰 */}
       <div className="fixed inset-0 bg-gradient-radial pointer-events-none" />
-      
-      {/* 更新提示横幅 */}
+
       <AnimatePresence>
         {showUpdateBanner && updateInfo?.update_available && (
           <motion.div
@@ -243,17 +348,13 @@ function App() {
                     </p>
                   ) : (
                     <>
-                      <p className="text-sm font-medium text-white">
-                        发现新版本 OpenClaw {updateInfo.latest_version}
-                      </p>
-                      <p className="text-xs text-white/70">
-                        当前版本: {updateInfo.current_version}
-                      </p>
+                      <p className="text-sm font-medium text-white">发现新版本 OpenClaw {updateInfo.latest_version}</p>
+                      <p className="text-xs text-white/70">当前版本: {updateInfo.current_version}</p>
                     </>
                   )}
                 </div>
               </div>
-              
+
               <div className="flex items-center gap-2">
                 {!updateResult && (
                   <button
@@ -288,19 +389,20 @@ function App() {
           </motion.div>
         )}
       </AnimatePresence>
-      
-      {/* 侧边栏 */}
+
       <Sidebar currentPage={currentPage} onNavigate={handleNavigate} serviceStatus={serviceStatus} />
-      
-      {/* 主内容区 */}
+
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* 标题栏（macOS 拖拽区域） */}
         <Header currentPage={currentPage} />
-        
-        {/* 页面内容 */}
-        <main className="flex-1 overflow-hidden p-6">
-          {renderPage()}
-        </main>
+        {webMode && (
+          <div className="px-6 py-2 border-b border-dark-700 bg-dark-800/40 flex items-center justify-between text-xs text-gray-400">
+            <span>Web 管理模式</span>
+            <button onClick={handleLogout} className="hover:text-white transition-colors">
+              退出登录
+            </button>
+          </div>
+        )}
+        <main className="flex-1 overflow-hidden p-6">{renderPage()}</main>
       </div>
     </div>
   );

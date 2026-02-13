@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand as invoke } from '../../lib/invoke';
 import {
   User,
   Shield,
@@ -48,10 +48,16 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
   const openConfigDir = async () => {
     try {
-      const { open } = await import('@tauri-apps/plugin-shell');
       const home = await invoke<{ config_dir: string }>('get_system_info');
-      // 尝试打开配置目录
-      await open(home.config_dir);
+      const configPath = home.config_dir;
+
+      if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+        const { open } = await import('@tauri-apps/plugin-shell');
+        await open(configPath);
+      } else {
+        await navigator.clipboard.writeText(configPath);
+        alert('配置目录路径已复制：' + configPath);
+      }
     } catch (e) {
       console.error('打开目录失败:', e);
     }

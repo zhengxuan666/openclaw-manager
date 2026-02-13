@@ -2,6 +2,25 @@
 
 高性能跨平台 AI 助手管理工具，基于 **Tauri 2.0 + React + TypeScript + Rust** 构建。
 
+## 📘 初始化文档
+
+- 中文初始化说明：`docs/初始化说明.md`
+- 中文开发规范：`docs/开发规范.md`
+- Web 部署说明：`docs/Web部署说明.md`
+
+## 🌐 Web 一体化启动（单服务）
+
+```bash
+npm run web:build
+bash scripts/1panel_web_start.sh
+```
+
+停止服务：
+
+```bash
+bash scripts/1panel_web_stop.sh
+```
+
 ![Platform](https://img.shields.io/badge/platform-macOS%20|%20Windows%20|%20Linux-blue)
 ![Tauri](https://img.shields.io/badge/Tauri-2.0-orange)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
