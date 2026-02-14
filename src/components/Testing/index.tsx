@@ -1,15 +1,9 @@
-import { useState } from 'react';
-import { motion } from 'framer-motion';
-import { invokeCommand as invoke } from '../../lib/invoke';
-import {
-  CheckCircle,
-  XCircle,
-  Play,
-  Loader2,
-  Stethoscope,
-} from 'lucide-react';
-import clsx from 'clsx';
-import { testingLogger } from '../../lib/logger';
+import { useState } from "react";
+import { motion } from "framer-motion";
+import { invokeCommand as invoke } from "../../lib/invoke";
+import { CheckCircle, XCircle, Play, Loader2, Stethoscope } from "lucide-react";
+import clsx from "clsx";
+import { testingLogger } from "../../lib/logger";
 
 interface DiagnosticResult {
   name: string;
@@ -19,39 +13,47 @@ interface DiagnosticResult {
 }
 
 export function Testing() {
-  const [diagnosticResults, setDiagnosticResults] = useState<DiagnosticResult[]>([]);
+  const [diagnosticResults, setDiagnosticResults] = useState<
+    DiagnosticResult[]
+  >([]);
   const [loading, setLoading] = useState(false);
 
   const runDiagnostics = async () => {
-    testingLogger.action('运行系统诊断');
-    testingLogger.info('开始系统诊断...');
+    testingLogger.action("运行系统诊断");
+    testingLogger.info("开始系统诊断...");
     setLoading(true);
     setDiagnosticResults([]);
     try {
-      const results = await invoke<DiagnosticResult[]>('run_doctor');
+      const results = await invoke<DiagnosticResult[]>("run_doctor");
       testingLogger.info(`诊断完成，共 ${results.length} 项检查`);
-      const passed = results.filter(r => r.passed).length;
-      testingLogger.state('诊断结果', { total: results.length, passed, failed: results.length - passed });
+      const passed = results.filter((r) => r.passed).length;
+      testingLogger.state("诊断结果", {
+        total: results.length,
+        passed,
+        failed: results.length - passed,
+      });
       setDiagnosticResults(results);
     } catch (e) {
-      testingLogger.error('诊断执行失败', e);
-      setDiagnosticResults([{
-        name: '诊断执行',
-        passed: false,
-        message: String(e),
-        suggestion: '请检查 OpenClaw 是否正确安装',
-      }]);
+      testingLogger.error("诊断执行失败", e);
+      setDiagnosticResults([
+        {
+          name: "诊断执行",
+          passed: false,
+          message: String(e),
+          suggestion: "请检查 OpenClaw 是否正确安装",
+        },
+      ]);
     } finally {
       setLoading(false);
     }
   };
 
   // 统计结果
-  const passedCount = diagnosticResults.filter(r => r.passed).length;
-  const failedCount = diagnosticResults.filter(r => !r.passed).length;
+  const passedCount = diagnosticResults.filter((r) => r.passed).length;
+  const failedCount = diagnosticResults.filter((r) => !r.passed).length;
 
   return (
-    <div className="h-full overflow-y-auto scroll-container pr-2">
+    <div className="h-full overflow-y-auto scroll-container pr-0 md:pr-2">
       <div className="max-w-4xl space-y-6">
         {/* 诊断测试 */}
         <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
@@ -86,12 +88,16 @@ export function Testing() {
             <div className="flex gap-4 mb-4 p-3 bg-dark-600 rounded-lg">
               <div className="flex items-center gap-2">
                 <CheckCircle size={16} className="text-green-400" />
-                <span className="text-sm text-green-400">{passedCount} 项通过</span>
+                <span className="text-sm text-green-400">
+                  {passedCount} 项通过
+                </span>
               </div>
               {failedCount > 0 && (
                 <div className="flex items-center gap-2">
                   <XCircle size={16} className="text-red-400" />
-                  <span className="text-sm text-red-400">{failedCount} 项失败</span>
+                  <span className="text-sm text-red-400">
+                    {failedCount} 项失败
+                  </span>
                 </div>
               )}
             </div>
@@ -108,25 +114,33 @@ export function Testing() {
                 <div
                   key={index}
                   className={clsx(
-                    'flex items-start gap-3 p-3 rounded-lg',
-                    result.passed ? 'bg-green-500/10' : 'bg-red-500/10'
+                    "flex items-start gap-3 p-3 rounded-lg",
+                    result.passed ? "bg-green-500/10" : "bg-red-500/10"
                   )}
                 >
                   {result.passed ? (
-                    <CheckCircle size={18} className="text-green-400 mt-0.5 flex-shrink-0" />
+                    <CheckCircle
+                      size={18}
+                      className="text-green-400 mt-0.5 flex-shrink-0"
+                    />
                   ) : (
-                    <XCircle size={18} className="text-red-400 mt-0.5 flex-shrink-0" />
+                    <XCircle
+                      size={18}
+                      className="text-red-400 mt-0.5 flex-shrink-0"
+                    />
                   )}
                   <div className="flex-1 min-w-0">
                     <p
                       className={clsx(
-                        'text-sm font-medium',
-                        result.passed ? 'text-green-400' : 'text-red-400'
+                        "text-sm font-medium",
+                        result.passed ? "text-green-400" : "text-red-400"
                       )}
                     >
                       {result.name}
                     </p>
-                    <p className="text-xs text-gray-400 mt-1 whitespace-pre-wrap break-words">{result.message}</p>
+                    <p className="text-xs text-gray-400 mt-1 whitespace-pre-wrap break-words">
+                      {result.message}
+                    </p>
                     {result.suggestion && (
                       <p className="text-xs text-amber-400 mt-1">
                         💡 {result.suggestion}
@@ -152,8 +166,14 @@ export function Testing() {
           <h4 className="text-sm font-medium text-gray-400 mb-2">诊断说明</h4>
           <ul className="text-sm text-gray-500 space-y-1">
             <li>• 系统诊断会检查 Node.js、OpenClaw 安装、配置文件等状态</li>
-            <li>• AI 连接测试请前往 <span className="text-claw-400">AI 配置</span> 页面进行</li>
-            <li>• 渠道测试请前往 <span className="text-claw-400">消息渠道</span> 页面进行</li>
+            <li>
+              • AI 连接测试请前往 <span className="text-claw-400">AI 配置</span>{" "}
+              页面进行
+            </li>
+            <li>
+              • 渠道测试请前往 <span className="text-claw-400">消息渠道</span>{" "}
+              页面进行
+            </li>
           </ul>
         </div>
       </div>

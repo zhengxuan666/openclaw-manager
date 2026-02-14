@@ -15,10 +15,28 @@ pub struct OpenClawConfig {
     pub gateway: GatewayConfig,
     /// 渠道配置
     #[serde(default)]
-    pub channels: HashMap<String, serde_json::Value>,
+    pub channels: HashMap<String, ChannelProviderConfig>,
     /// 插件配置
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// 路由绑定配置
+    #[serde(default)]
+    pub bindings: Option<serde_json::Value>,
+    /// 工具配置
+    #[serde(default)]
+    pub tools: Option<serde_json::Value>,
+    /// 消息配置
+    #[serde(default)]
+    pub messages: Option<serde_json::Value>,
+    /// 命令配置
+    #[serde(default)]
+    pub commands: Option<serde_json::Value>,
+    /// Web 配置
+    #[serde(default)]
+    pub web: Option<serde_json::Value>,
+    /// 发现配置
+    #[serde(default)]
+    pub discovery: Option<serde_json::Value>,
     /// 元数据
     #[serde(default)]
     pub meta: MetaConfig,
@@ -30,6 +48,9 @@ pub struct AgentsConfig {
     /// 默认配置
     #[serde(default)]
     pub defaults: AgentDefaults,
+    /// Agent 列表（兼容官方 agents.list）
+    #[serde(default)]
+    pub list: Vec<serde_json::Value>,
 }
 
 /// Agent 默认配置
@@ -134,6 +155,18 @@ pub struct GatewayConfig {
     /// 模式：local 或 cloud
     #[serde(default)]
     pub mode: Option<String>,
+    /// 监听端口
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// 监听地址
+    #[serde(default)]
+    pub bind: Option<String>,
+    /// 可信代理列表
+    #[serde(rename = "trustedProxies", default)]
+    pub trusted_proxies: Option<Vec<String>>,
+    /// 热重载配置
+    #[serde(default)]
+    pub reload: Option<serde_json::Value>,
     /// 认证配置
     #[serde(default)]
     pub auth: Option<GatewayAuthConfig>,
@@ -146,6 +179,20 @@ pub struct GatewayAuthConfig {
     pub mode: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
+}
+
+/// 渠道 Provider 配置（兼容 accounts 多账号）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChannelProviderConfig {
+    /// 是否启用
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// 多账号配置
+    #[serde(default)]
+    pub accounts: HashMap<String, serde_json::Value>,
+    /// 其余字段保持兼容
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// 插件配置
@@ -294,8 +341,11 @@ pub struct ChannelConfig {
     pub channel_type: String,
     /// 是否启用
     pub enabled: bool,
-    /// 配置详情
+    /// 配置详情（兼容旧版前端平铺字段）
     pub config: HashMap<String, serde_json::Value>,
+    /// 多账号配置（兼容 channels.<provider>.accounts）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// 环境变量配置

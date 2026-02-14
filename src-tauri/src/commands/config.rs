@@ -10,18 +10,137 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::command;
 
-/// 获取 openclaw.json 配置
-fn load_openclaw_config() -> Result<Value, String> {
+/// 解析 openclaw 配置（JSON / JSON5）
+fn parse_openclaw_config_content(content: &str) -> Result<Value, String> {
+    match serde_json::from_str(content) {
+        Ok(v) => Ok(v),
+        Err(json_err) => {
+            // 兼容官方 JSON5 配置格式（注释、尾逗号等）
+            json5::from_str(content)
+                .map_err(|json5_err| format!("解析配置文件失败(JSON: {}; JSON5: {})", json_err, json5_err))
+        }
+    }
+}
+
+/// 获取 openclaw.json 原始配置（不做变量替换，用于写回场景）
+fn load_openclaw_config_raw() -> Result<Value, String> {
     let config_path = platform::get_config_file_path();
-    
+
     if !file::file_exists(&config_path) {
         return Ok(json!({}));
     }
-    
-    let content =
-        file::read_file(&config_path).map_err(|e| format!("读取配置文件失败: {}", e))?;
-    
-    serde_json::from_str(&content).map_err(|e| format!("解析配置文件失败: {}", e))
+
+    let content = file::read_file(&config_path).map_err(|e| format!("读取配置文件失败: {}", e))?;
+    parse_openclaw_config_content(&content)
+}
+
+/// 读取 ~/.openclaw/env 环境变量
+fn load_env_file_vars() -> HashMap<String, String> {
+    let env_path = platform::get_env_file_path();
+    let mut vars = HashMap::new();
+
+    let content = match file::read_file(&env_path) {
+        Ok(c) => c,
+        Err(_) => return vars,
+    };
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !key.is_empty() {
+                vars.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+
+    vars
+}
+
+/// 字符串中的变量替换：支持 ${VAR}；支持 $${VAR} 作为字面量 ${VAR}
+fn replace_config_vars_in_string(input: &str, env_file_vars: &HashMap<String, String>) -> Result<String, String> {
+    let mut output = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            // 转义：$${VAR} -> ${VAR}
+            if i + 2 < bytes.len() && bytes[i + 1] == b'$' && bytes[i + 2] == b'{' {
+                if let Some(end_rel) = input[i + 3..].find('}') {
+                    let end = i + 3 + end_rel;
+                    let var_name = &input[i + 3..end];
+                    output.push_str("${");
+                    output.push_str(var_name);
+                    output.push('}');
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            // 常规变量：${VAR}
+            if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                if let Some(end_rel) = input[i + 2..].find('}') {
+                    let end = i + 2 + end_rel;
+                    let var_name = input[i + 2..end].trim();
+                    if var_name.is_empty() {
+                        return Err("配置变量替换失败: 变量名不能为空".to_string());
+                    }
+
+                    let var_value = std::env::var(var_name)
+                        .ok()
+                        .or_else(|| env_file_vars.get(var_name).cloned())
+                        .ok_or_else(|| format!("配置变量替换失败: 缺失变量 {}", var_name))?;
+
+                    output.push_str(&var_value);
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+
+        let ch = input[i..].chars().next().unwrap_or('\0');
+        output.push(ch);
+        i += ch.len_utf8();
+    }
+
+    Ok(output)
+}
+
+/// 递归替换 Value 中所有字符串变量，支持对象/数组
+fn replace_config_vars(value: &mut Value, env_file_vars: &HashMap<String, String>) -> Result<(), String> {
+    match value {
+        Value::String(s) => {
+            *s = replace_config_vars_in_string(s, env_file_vars)?;
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                replace_config_vars(item, env_file_vars)?;
+            }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                replace_config_vars(v, env_file_vars)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// 获取 openclaw.json 配置（读取后执行 ${VAR} 替换）
+fn load_openclaw_config() -> Result<Value, String> {
+    let mut config = load_openclaw_config_raw()?;
+    let env_file_vars = load_env_file_vars();
+    replace_config_vars(&mut config, &env_file_vars)?;
+    Ok(config)
 }
 
 /// 保存 openclaw.json 配置
@@ -46,14 +165,43 @@ pub async fn get_config() -> Result<Value, String> {
     result
 }
 
+/// 合并 gateway 关键字段，避免保存配置时误丢失关键网络参数
+fn merge_gateway_critical_fields(target: &mut Value, source: &Value) {
+    let Some(source_gateway) = source.get("gateway").and_then(|v| v.as_object()) else {
+        return;
+    };
+
+    if target.get("gateway").and_then(|v| v.as_object()).is_none() {
+        target["gateway"] = json!({});
+    }
+
+    let Some(target_gateway) = target.get_mut("gateway").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+
+    for field in ["port", "bind", "trustedProxies", "reload"] {
+        if !target_gateway.contains_key(field) {
+            if let Some(value) = source_gateway.get(field) {
+                target_gateway.insert(field.to_string(), value.clone());
+            }
+        }
+    }
+}
+
 /// 保存配置
 #[command]
-pub async fn save_config(config: Value) -> Result<String, String> {
+pub async fn save_config(mut config: Value) -> Result<String, String> {
     info!("[保存配置] 保存 openclaw.json 配置...");
     debug!(
         "[保存配置] 配置内容: {}",
         serde_json::to_string_pretty(&config).unwrap_or_default()
     );
+
+    // 兼容旧前端可能只提交部分字段：保留既有 gateway 关键字段，避免 port/bind/trustedProxies/reload 丢失
+    if let Ok(existing) = load_openclaw_config_raw() {
+        merge_gateway_critical_fields(&mut config, &existing);
+    }
+
     match save_openclaw_config(&config) {
         Ok(_) => {
             info!("[保存配置] ✓ 配置保存成功");
@@ -64,6 +212,59 @@ pub async fn save_config(config: Value) -> Result<String, String> {
             Err(e)
         }
     }
+}
+
+/// 获取 agents.list（向后兼容：不存在时返回 []）
+#[command]
+pub async fn get_agents_list() -> Result<Value, String> {
+    info!("[Agents List] 获取 agents.list...");
+    let config = load_openclaw_config()?;
+    Ok(config
+        .pointer("/agents/list")
+        .cloned()
+        .unwrap_or_else(|| json!([])))
+}
+
+/// 保存 agents.list（全量写入）
+#[command]
+pub async fn save_agents_list(agents_list: Value) -> Result<String, String> {
+    info!("[Agents List] 保存 agents.list...");
+
+    let mut config = load_openclaw_config_raw()?;
+
+    if config.get("agents").and_then(|v| v.as_object()).is_none() {
+        config["agents"] = json!({});
+    }
+
+    config["agents"]["list"] = agents_list;
+    save_openclaw_config(&config)?;
+
+    info!("[Agents List] ✓ agents.list 保存成功");
+    Ok("agents.list 已保存".to_string())
+}
+
+/// 获取 bindings（向后兼容：不存在时返回 {}）
+#[command]
+pub async fn get_bindings() -> Result<Value, String> {
+    info!("[Bindings] 获取 bindings...");
+    let config = load_openclaw_config()?;
+    Ok(config
+        .get("bindings")
+        .cloned()
+        .unwrap_or_else(|| json!({})))
+}
+
+/// 保存 bindings（全量写入）
+#[command]
+pub async fn save_bindings(bindings: Value) -> Result<String, String> {
+    info!("[Bindings] 保存 bindings...");
+
+    let mut config = load_openclaw_config_raw()?;
+    config["bindings"] = bindings;
+    save_openclaw_config(&config)?;
+
+    info!("[Bindings] ✓ bindings 保存成功");
+    Ok("bindings 已保存".to_string())
 }
 
 /// 获取环境变量值
@@ -127,8 +328,8 @@ fn generate_token() -> String {
 pub async fn get_or_create_gateway_token() -> Result<String, String> {
     info!("[Gateway Token] 获取或创建 Gateway Token...");
     
-    let mut config = load_openclaw_config()?;
-    
+    let mut config = load_openclaw_config_raw()?;
+
     // 检查是否已有 token
     if let Some(token) = config
         .pointer("/gateway/auth/token")
@@ -168,10 +369,16 @@ pub async fn get_or_create_gateway_token() -> Result<String, String> {
 #[command]
 pub async fn get_dashboard_url() -> Result<String, String> {
     info!("[Dashboard URL] 获取 Dashboard URL...");
-    
+
     let token = get_or_create_gateway_token().await?;
-    let url = format!("http://localhost:18789?token={}", token);
-    
+    let config = load_openclaw_config_raw()?;
+    let port = config
+        .pointer("/gateway/port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(18789);
+
+    let url = format!("http://localhost:{}?token={}", port, token);
+
     info!("[Dashboard URL] ✓ URL: {}...", &url[..50.min(url.len())]);
     Ok(url)
 }
@@ -562,7 +769,7 @@ pub async fn save_provider(
         models.len()
     );
 
-    let mut config = load_openclaw_config()?;
+    let mut config = load_openclaw_config_raw()?;
 
     // 确保路径存在
     if config.get("models").is_none() {
@@ -681,7 +888,7 @@ pub async fn save_provider(
 pub async fn delete_provider(provider_name: String) -> Result<String, String> {
     info!("[删除 Provider] 删除 Provider: {}", provider_name);
 
-    let mut config = load_openclaw_config()?;
+    let mut config = load_openclaw_config_raw()?;
 
     // 删除 Provider 配置
     if let Some(providers) = config
@@ -728,7 +935,7 @@ pub async fn delete_provider(provider_name: String) -> Result<String, String> {
 pub async fn set_primary_model(model_id: String) -> Result<String, String> {
     info!("[设置主模型] 设置主模型: {}", model_id);
 
-    let mut config = load_openclaw_config()?;
+    let mut config = load_openclaw_config_raw()?;
 
     // 确保路径存在
     if config.get("agents").is_none() {
@@ -755,7 +962,7 @@ pub async fn set_primary_model(model_id: String) -> Result<String, String> {
 pub async fn add_available_model(model_id: String) -> Result<String, String> {
     info!("[添加模型] 添加模型到可用列表: {}", model_id);
 
-    let mut config = load_openclaw_config()?;
+    let mut config = load_openclaw_config_raw()?;
 
     // 确保路径存在
     if config.get("agents").is_none() {
@@ -782,7 +989,7 @@ pub async fn add_available_model(model_id: String) -> Result<String, String> {
 pub async fn remove_available_model(model_id: String) -> Result<String, String> {
     info!("[移除模型] 从可用列表移除模型: {}", model_id);
 
-    let mut config = load_openclaw_config()?;
+    let mut config = load_openclaw_config_raw()?;
 
     if let Some(models) = config
         .pointer_mut("/agents/defaults/models")
@@ -831,18 +1038,148 @@ pub async fn get_ai_providers() -> Result<Vec<crate::models::AIProviderOption>, 
 
 // ============ 渠道配置 ============
 
+fn parse_account_bindings(bindings: &Value) -> HashMap<(String, String), String> {
+    let mut result = HashMap::new();
+
+    if let Some(arr) = bindings.as_array() {
+        for item in arr {
+            let Some(agent_id) = item.get("agentId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(m) = item.get("match").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            let Some(channel) = m.get("channel").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(account_id) = m.get("accountId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            result.insert(
+                (channel.to_string(), account_id.to_string()),
+                agent_id.to_string(),
+            );
+        }
+        return result;
+    }
+
+    if let Some(obj) = bindings.as_object() {
+        // 扁平格式：{"telegram/default":"main"}
+        for (key, value) in obj {
+            if let Some(agent_id) = value.as_str() {
+                if let Some((channel, account_id)) = key.split_once('/') {
+                    result.insert(
+                        (channel.to_string(), account_id.to_string()),
+                        agent_id.to_string(),
+                    );
+                    continue;
+                }
+                if let Some((channel, account_id)) = key.split_once(':') {
+                    result.insert(
+                        (channel.to_string(), account_id.to_string()),
+                        agent_id.to_string(),
+                    );
+                    continue;
+                }
+                if let Some((channel, account_id)) = key.split_once('.') {
+                    result.insert(
+                        (channel.to_string(), account_id.to_string()),
+                        agent_id.to_string(),
+                    );
+                    continue;
+                }
+            }
+
+            // 分组格式：{"telegram":{"default":"main"}}
+            if let Some(accounts_obj) = value.as_object() {
+                for (account_id, nested) in accounts_obj {
+                    if let Some(agent_id) = nested.as_str() {
+                        result.insert(
+                            (key.to_string(), account_id.to_string()),
+                            agent_id.to_string(),
+                        );
+                        continue;
+                    }
+
+                    if let Some(nested_obj) = nested.as_object() {
+                        if let Some(agent_id) = nested_obj.get("agentId").and_then(|v| v.as_str()) {
+                            result.insert(
+                                (key.to_string(), account_id.to_string()),
+                                agent_id.to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn merge_bindings_payload_by_shape(
+    original_bindings: &Value,
+    all_pairs: &HashMap<(String, String), String>,
+) -> Value {
+    // 默认与数组格式都写回官方数组结构
+    if original_bindings.is_array() || !original_bindings.is_object() {
+        let mut entries = Vec::new();
+        for ((channel, account_id), agent_id) in all_pairs {
+            entries.push(json!({
+                "agentId": agent_id,
+                "match": {
+                    "channel": channel,
+                    "accountId": account_id,
+                }
+            }));
+        }
+        return Value::Array(entries);
+    }
+
+    let Some(obj) = original_bindings.as_object() else {
+        return Value::Array(vec![]);
+    };
+
+    // 判断是否扁平对象
+    let is_flat = obj.values().all(|v| v.is_string());
+    if is_flat {
+        let mut flat = serde_json::Map::new();
+        for ((channel, account_id), agent_id) in all_pairs {
+            flat.insert(format!("{}/{}", channel, account_id), json!(agent_id));
+        }
+        return Value::Object(flat);
+    }
+
+    // 分组对象
+    let mut grouped: HashMap<String, serde_json::Map<String, Value>> = HashMap::new();
+    for ((channel, account_id), agent_id) in all_pairs {
+        grouped
+            .entry(channel.clone())
+            .or_default()
+            .insert(account_id.clone(), json!(agent_id));
+    }
+
+    let mut grouped_obj = serde_json::Map::new();
+    for (channel, accounts) in grouped {
+        grouped_obj.insert(channel, Value::Object(accounts));
+    }
+    Value::Object(grouped_obj)
+}
+
 /// 获取渠道配置 - 从 openclaw.json 和 env 文件读取
 #[command]
 pub async fn get_channels_config() -> Result<Vec<ChannelConfig>, String> {
     info!("[渠道配置] 获取渠道配置列表...");
-    
+
     let config = load_openclaw_config()?;
     let channels_obj = config.get("channels").cloned().unwrap_or(json!({}));
+    let bindings_obj = config.get("bindings").cloned().unwrap_or(json!([]));
+    let account_bindings = parse_account_bindings(&bindings_obj);
     let env_path = platform::get_env_file_path();
     debug!("[渠道配置] 环境文件路径: {}", env_path);
-    
+
     let mut channels = Vec::new();
-    
+
     // 支持的渠道类型列表及其测试字段
     let channel_types = vec![
         ("telegram", "telegram", vec!["userId"]),
@@ -854,20 +1191,41 @@ pub async fn get_channels_config() -> Result<Vec<ChannelConfig>, String> {
         ("wechat", "wechat", vec![]),
         ("dingtalk", "dingtalk", vec![]),
     ];
-    
+
     for (channel_id, channel_type, test_fields) in channel_types {
         let channel_config = channels_obj.get(channel_id);
-        
+
+        let mut accounts = channel_config
+            .and_then(|c| c.get("accounts"))
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<HashMap<String, Value>>()
+            })
+            .unwrap_or_default();
+
+        // bindings 存在但 accounts 不存在时，自动补齐空账号节点，便于前端直接编辑
+        for ((binding_channel, account_id), agent_id) in &account_bindings {
+            if binding_channel == channel_id {
+                let entry = accounts.entry(account_id.clone()).or_insert_with(|| json!({}));
+                if let Some(obj) = entry.as_object_mut() {
+                    // bindings 为权威来源，始终写入 agentId，避免账号内遗留旧值
+                    obj.insert("agentId".to_string(), json!(agent_id));
+                }
+            }
+        }
+
         let enabled = channel_config
             .and_then(|c| c.get("enabled"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        
-        // 将渠道配置转换为 HashMap
+
+        // 将渠道配置转换为 HashMap（兼容旧版前端平铺字段）
         let mut config_map: HashMap<String, Value> = if let Some(cfg) = channel_config {
             if let Some(obj) = cfg.as_object() {
                 obj.iter()
-                    .filter(|(k, _)| *k != "enabled") // 排除 enabled 字段
+                    .filter(|(k, _)| *k != "enabled" && *k != "accounts")
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect()
             } else {
@@ -876,7 +1234,7 @@ pub async fn get_channels_config() -> Result<Vec<ChannelConfig>, String> {
         } else {
             HashMap::new()
         };
-        
+
         // 从 env 文件读取测试字段
         for field in test_fields {
             let env_key = format!(
@@ -888,18 +1246,19 @@ pub async fn get_channels_config() -> Result<Vec<ChannelConfig>, String> {
                 config_map.insert(field.to_string(), json!(value));
             }
         }
-        
-        // 判断是否已配置（有任何非空配置项）
-        let has_config = !config_map.is_empty() || enabled;
-        
+
+        let has_accounts = !accounts.is_empty();
+        let has_config = !config_map.is_empty() || enabled || has_accounts;
+
         channels.push(ChannelConfig {
             id: channel_id.to_string(),
             channel_type: channel_type.to_string(),
             enabled: has_config,
             config: config_map,
+            accounts: if accounts.is_empty() { None } else { Some(accounts) },
         });
     }
-    
+
     info!("[渠道配置] ✓ 返回 {} 个渠道配置", channels.len());
     for ch in &channels {
         debug!("[渠道配置] - {}: enabled={}", ch.id, ch.enabled);
@@ -914,16 +1273,16 @@ pub async fn save_channel_config(channel: ChannelConfig) -> Result<String, Strin
         "[保存渠道配置] 保存渠道配置: {} ({})",
         channel.id, channel.channel_type
     );
-    
-    let mut config = load_openclaw_config()?;
+
+    let mut config = load_openclaw_config_raw()?;
     let env_path = platform::get_env_file_path();
     debug!("[保存渠道配置] 环境文件路径: {}", env_path);
-    
+
     // 确保 channels 对象存在
     if config.get("channels").is_none() {
         config["channels"] = json!({});
     }
-    
+
     // 确保 plugins 对象存在
     if config.get("plugins").is_none() {
         config["plugins"] = json!({
@@ -937,15 +1296,15 @@ pub async fn save_channel_config(channel: ChannelConfig) -> Result<String, Strin
     if config["plugins"].get("entries").is_none() {
         config["plugins"]["entries"] = json!({});
     }
-    
+
     // 这些字段只用于测试，不保存到 openclaw.json，而是保存到 env 文件
     let test_only_fields = vec!["userId", "testChatId", "testChannelId"];
-    
+
     // 构建渠道配置
     let mut channel_obj = json!({
         "enabled": true
     });
-    
+
     // 添加渠道特定配置
     for (key, value) in &channel.config {
         if test_only_fields.contains(&key.as_str()) {
@@ -963,23 +1322,64 @@ pub async fn save_channel_config(channel: ChannelConfig) -> Result<String, Strin
             channel_obj[key] = value.clone();
         }
     }
-    
+
+    // 保留/写入 accounts 多账号配置（兼容 channels.<provider>.accounts）
+    if let Some(accounts) = &channel.accounts {
+        let accounts_obj = accounts
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<serde_json::Map<String, Value>>();
+        if !accounts_obj.is_empty() {
+            channel_obj["accounts"] = Value::Object(accounts_obj);
+        }
+    } else if let Some(existing_accounts) = config
+        .pointer(&format!("/channels/{}/accounts", channel.id))
+        .cloned()
+    {
+        channel_obj["accounts"] = existing_accounts;
+    }
+
     // 更新 channels 配置
     config["channels"][&channel.id] = channel_obj;
-    
-    // 更新 plugins.allow 数组 - 确保渠道在白名单中
+
+    // 更新 plugins.allow 数组 - 确保渠道在白名单中，并清理空字符串
     if let Some(allow_arr) = config["plugins"]["allow"].as_array_mut() {
+        allow_arr.retain(|v| v.as_str().map(|s| !s.trim().is_empty()).unwrap_or(true));
+
         let channel_id_val = json!(&channel.id);
         if !allow_arr.contains(&channel_id_val) {
             allow_arr.push(channel_id_val);
         }
     }
-    
+
     // 更新 plugins.entries - 确保插件已启用
     config["plugins"]["entries"][&channel.id] = json!({
         "enabled": true
     });
-    
+
+    // 同步更新 bindings：只替换当前 channel 的账号映射，其它渠道保持不变
+    let existing_bindings = config.get("bindings").cloned().unwrap_or(json!([]));
+    let mut all_pairs = parse_account_bindings(&existing_bindings);
+
+    all_pairs.retain(|(binding_channel, _), _| binding_channel != &channel.id);
+
+    if let Some(accounts) = &channel.accounts {
+        for (account_id, account_cfg) in accounts {
+            if let Some(obj) = account_cfg.as_object() {
+                if let Some(agent_id) = obj.get("agentId").and_then(|v| v.as_str()) {
+                    if !agent_id.trim().is_empty() {
+                        all_pairs.insert(
+                            (channel.id.clone(), account_id.clone()),
+                            agent_id.to_string(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    config["bindings"] = merge_bindings_payload_by_shape(&existing_bindings, &all_pairs);
+
     // 保存配置
     info!("[保存渠道配置] 写入配置文件...");
     match save_openclaw_config(&config) {
@@ -1001,28 +1401,34 @@ pub async fn save_channel_config(channel: ChannelConfig) -> Result<String, Strin
 #[command]
 pub async fn clear_channel_config(channel_id: String) -> Result<String, String> {
     info!("[清空渠道配置] 清空渠道配置: {}", channel_id);
-    
-    let mut config = load_openclaw_config()?;
+
+    let mut config = load_openclaw_config_raw()?;
     let env_path = platform::get_env_file_path();
-    
+
     // 从 channels 对象中删除该渠道
     if let Some(channels) = config.get_mut("channels").and_then(|v| v.as_object_mut()) {
         channels.remove(&channel_id);
         info!("[清空渠道配置] 已从 channels 中删除: {}", channel_id);
     }
-    
+
     // 从 plugins.allow 数组中删除
     if let Some(allow_arr) = config.pointer_mut("/plugins/allow").and_then(|v| v.as_array_mut()) {
         allow_arr.retain(|v| v.as_str() != Some(&channel_id));
         info!("[清空渠道配置] 已从 plugins.allow 中删除: {}", channel_id);
     }
-    
+
     // 从 plugins.entries 中删除
     if let Some(entries) = config.pointer_mut("/plugins/entries").and_then(|v| v.as_object_mut()) {
         entries.remove(&channel_id);
         info!("[清空渠道配置] 已从 plugins.entries 中删除: {}", channel_id);
     }
-    
+
+    // 清除该渠道相关 bindings，避免遗留 accountId -> agentId 映射
+    let existing_bindings = config.get("bindings").cloned().unwrap_or(json!([]));
+    let mut all_pairs = parse_account_bindings(&existing_bindings);
+    all_pairs.retain(|(binding_channel, _), _| binding_channel != &channel_id);
+    config["bindings"] = merge_bindings_payload_by_shape(&existing_bindings, &all_pairs);
+
     // 清除相关的环境变量
     let env_prefixes = vec![
         format!("OPENCLAW_{}_USERID", channel_id.to_uppercase()),
@@ -1032,7 +1438,7 @@ pub async fn clear_channel_config(channel_id: String) -> Result<String, String> 
     for env_key in env_prefixes {
         let _ = file::remove_env_value(&env_path, &env_key);
     }
-    
+
     // 保存配置
     match save_openclaw_config(&config) {
         Ok(_) => {

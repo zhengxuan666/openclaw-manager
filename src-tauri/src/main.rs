@@ -37,13 +37,17 @@ fn main() {
             // 配置管理
             config::get_config,
             config::save_config,
+            config::get_agents_list,
+            config::save_agents_list,
+            config::get_bindings,
+            config::save_bindings,
             config::get_env_value,
             config::save_env_value,
             config::get_ai_providers,
             config::get_channels_config,
             config::save_channel_config,
             config::clear_channel_config,
-            // Gateway Token
+
             config::get_or_create_gateway_token,
             config::get_dashboard_url,
             // AI 配置管理

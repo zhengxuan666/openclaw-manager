@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { invokeCommand as invoke } from '../../lib/invoke';
+import { useEffect, useState } from "react";
+import { invokeCommand as invoke } from "../../lib/invoke";
 import {
   User,
   Shield,
@@ -10,7 +10,7 @@ import {
   Trash2,
   AlertTriangle,
   X,
-} from 'lucide-react';
+} from "lucide-react";
 
 interface InstallResult {
   success: boolean;
@@ -24,23 +24,31 @@ interface SettingsProps {
 
 export function Settings({ onEnvironmentChange }: SettingsProps) {
   const [identity, setIdentity] = useState({
-    botName: 'Clawd',
-    userName: '主人',
-    timezone: 'Asia/Shanghai',
+    botName: "Clawd",
+    userName: "主人",
+    timezone: "Asia/Shanghai",
   });
   const [saving, setSaving] = useState(false);
   const [showUninstallConfirm, setShowUninstallConfirm] = useState(false);
   const [uninstalling, setUninstalling] = useState(false);
-  const [uninstallResult, setUninstallResult] = useState<InstallResult | null>(null);
+  const [uninstallResult, setUninstallResult] = useState<InstallResult | null>(
+    null
+  );
+
+  const [agentsListText, setAgentsListText] = useState("[]");
+  const [bindingsText, setBindingsText] = useState("{}");
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [configMessage, setConfigMessage] = useState<string | null>(null);
 
   const handleSave = async () => {
     setSaving(true);
     try {
       // TODO: 保存身份配置
       await new Promise((resolve) => setTimeout(resolve, 500));
-      alert('设置已保存！');
+      alert("设置已保存！");
     } catch (e) {
-      console.error('保存失败:', e);
+      console.error("保存失败:", e);
     } finally {
       setSaving(false);
     }
@@ -48,18 +56,18 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
   const openConfigDir = async () => {
     try {
-      const home = await invoke<{ config_dir: string }>('get_system_info');
+      const home = await invoke<{ config_dir: string }>("get_system_info");
       const configPath = home.config_dir;
 
-      if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-        const { open } = await import('@tauri-apps/plugin-shell');
+      if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+        const { open } = await import("@tauri-apps/plugin-shell");
         await open(configPath);
       } else {
         await navigator.clipboard.writeText(configPath);
-        alert('配置目录路径已复制：' + configPath);
+        alert("配置目录路径已复制：" + configPath);
       }
     } catch (e) {
-      console.error('打开目录失败:', e);
+      console.error("打开目录失败:", e);
     }
   };
 
@@ -67,7 +75,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     setUninstalling(true);
     setUninstallResult(null);
     try {
-      const result = await invoke<InstallResult>('uninstall_openclaw');
+      const result = await invoke<InstallResult>("uninstall_openclaw");
       setUninstallResult(result);
       if (result.success) {
         // 通知环境状态变化，触发重新检查
@@ -80,7 +88,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     } catch (e) {
       setUninstallResult({
         success: false,
-        message: '卸载过程中发生错误',
+        message: "卸载过程中发生错误",
         error: String(e),
       });
     } finally {
@@ -88,8 +96,55 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     }
   };
 
+  useEffect(() => {
+    const loadAgentAndBindingConfig = async () => {
+      setConfigLoading(true);
+      setConfigError(null);
+
+      try {
+        const [agentsList, bindings] = await Promise.all([
+          invoke<unknown>("get_agents_list"),
+          invoke<unknown>("get_bindings"),
+        ]);
+
+        setAgentsListText(JSON.stringify(agentsList ?? [], null, 2));
+        setBindingsText(JSON.stringify(bindings ?? {}, null, 2));
+      } catch (e) {
+        console.error("加载 agents.list / bindings 失败:", e);
+        setConfigError(String(e));
+      } finally {
+        setConfigLoading(false);
+      }
+    };
+
+    loadAgentAndBindingConfig();
+  }, []);
+
+  const saveAgentAndBindingConfig = async () => {
+    setConfigLoading(true);
+    setConfigError(null);
+    setConfigMessage(null);
+
+    try {
+      const parsedAgentsList = JSON.parse(agentsListText);
+      const parsedBindings = JSON.parse(bindingsText);
+
+      await invoke<string>("save_agents_list", {
+        agentsList: parsedAgentsList,
+      });
+      await invoke<string>("save_bindings", { bindings: parsedBindings });
+
+      setConfigMessage("agents.list 与 bindings 已保存");
+    } catch (e) {
+      console.error("保存 agents.list / bindings 失败:", e);
+      setConfigError(String(e));
+    } finally {
+      setConfigLoading(false);
+    }
+  };
+
   return (
-    <div className="h-full overflow-y-auto scroll-container pr-2">
+    <div className="h-full overflow-y-auto scroll-container pr-0 md:pr-2">
       <div className="max-w-2xl space-y-6">
         {/* 身份配置 */}
         <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
@@ -144,7 +199,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                 className="input-base"
               >
                 <option value="Asia/Shanghai">Asia/Shanghai (北京时间)</option>
-                <option value="Asia/Hong_Kong">Asia/Hong_Kong (香港时间)</option>
+                <option value="Asia/Hong_Kong">
+                  Asia/Hong_Kong (香港时间)
+                </option>
                 <option value="Asia/Tokyo">Asia/Tokyo (东京时间)</option>
                 <option value="America/New_York">
                   America/New_York (纽约时间)
@@ -222,6 +279,75 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           </div>
         </div>
 
+        {/* Agent 与 Binding 配置 */}
+        <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 rounded-xl bg-cyan-500/20 flex items-center justify-center">
+              <FileCode size={20} className="text-cyan-400" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-white">
+                Agent 与 Binding 配置
+              </h3>
+              <p className="text-xs text-gray-500">
+                使用 JSON 文本编辑 agents.list 与 bindings
+              </p>
+            </div>
+          </div>
+
+          {configError && (
+            <div className="mb-4 p-3 rounded-lg bg-red-900/30 border border-red-800 text-sm text-red-300">
+              {configError}
+            </div>
+          )}
+          {configMessage && !configError && (
+            <div className="mb-4 p-3 rounded-lg bg-green-900/30 border border-green-800 text-sm text-green-300">
+              {configMessage}
+            </div>
+          )}
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">
+                agents.list (JSON)
+              </label>
+              <textarea
+                value={agentsListText}
+                onChange={(e) => setAgentsListText(e.target.value)}
+                rows={8}
+                className="input-base font-mono text-xs"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">
+                bindings (JSON)
+              </label>
+              <textarea
+                value={bindingsText}
+                onChange={(e) => setBindingsText(e.target.value)}
+                rows={8}
+                className="input-base font-mono text-xs"
+              />
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                onClick={saveAgentAndBindingConfig}
+                disabled={configLoading}
+                className="btn-secondary flex items-center gap-2"
+              >
+                {configLoading ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Save size={16} />
+                )}
+                保存 agents.list / bindings
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* 危险操作 */}
         <div className="bg-dark-700 rounded-2xl p-6 border border-red-900/30">
           <div className="flex items-center gap-3 mb-6">
@@ -230,7 +356,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
             </div>
             <div>
               <h3 className="text-lg font-semibold text-white">危险操作</h3>
-              <p className="text-xs text-gray-500">以下操作不可撤销，请谨慎操作</p>
+              <p className="text-xs text-gray-500">
+                以下操作不可撤销，请谨慎操作
+              </p>
             </div>
           </div>
 
@@ -242,7 +370,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
               <Trash2 size={18} className="text-red-400" />
               <div className="flex-1">
                 <p className="text-sm text-red-300">卸载 OpenClaw</p>
-                <p className="text-xs text-red-400/70">从系统中移除 OpenClaw CLI 工具</p>
+                <p className="text-xs text-red-400/70">
+                  从系统中移除 OpenClaw CLI 工具
+                </p>
               </div>
             </button>
           </div>
@@ -317,8 +447,20 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                   </div>
                 </>
               ) : (
-                <div className={`p-4 rounded-lg ${uninstallResult.success ? 'bg-green-900/30 border border-green-800' : 'bg-red-900/30 border border-red-800'}`}>
-                  <p className={`text-sm ${uninstallResult.success ? 'text-green-300' : 'text-red-300'}`}>
+                <div
+                  className={`p-4 rounded-lg ${
+                    uninstallResult.success
+                      ? "bg-green-900/30 border border-green-800"
+                      : "bg-red-900/30 border border-red-800"
+                  }`}
+                >
+                  <p
+                    className={`text-sm ${
+                      uninstallResult.success
+                        ? "text-green-300"
+                        : "text-red-300"
+                    }`}
+                  >
                     {uninstallResult.message}
                   </p>
                   {uninstallResult.error && (

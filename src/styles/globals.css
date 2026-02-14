@@ -8,14 +8,21 @@
   padding: 0;
   box-sizing: border-box;
 }
-
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   overflow: hidden;
+  min-width: 0;
+}
+
+#root {
+  width: 100%;
 }
 
 body {
-  font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-family: "SF Pro Display", -apple-system, BlinkMacSystemFont,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   background-color: #0a0a0b;
   color: #e5e5e5;
   -webkit-font-smoothing: antialiased;
@@ -38,7 +45,9 @@ body {
 }
 
 /* 输入框焦点样式 */
-input:focus, textarea:focus, select:focus {
+input:focus,
+textarea:focus,
+select:focus {
   outline: none;
 }
 
@@ -53,15 +62,15 @@ button:disabled {
   .animate-in {
     animation: fadeIn 0.3s ease-out;
   }
-  
+
   .slide-in-right {
     animation: slideInRight 0.3s ease-out;
   }
-  
+
   .slide-in-up {
     animation: slideUp 0.3s ease-out;
   }
-  
+
   @keyframes slideInRight {
     from {
       transform: translateX(20px);
@@ -72,14 +81,15 @@ button:disabled {
       opacity: 1;
     }
   }
-  
+
   /* 发光脉冲 */
   .glow-pulse {
     animation: glowPulse 2s ease-in-out infinite;
   }
-  
+
   @keyframes glowPulse {
-    0%, 100% {
+    0%,
+    100% {
       box-shadow: 0 0 5px rgba(249, 77, 58, 0.4);
     }
     50% {
@@ -91,12 +101,14 @@ button:disabled {
 /* 滚动条容器 */
 .scroll-container {
   overflow-y: auto;
+  overflow-x: hidden;
+  min-width: 0;
   scrollbar-gutter: stable;
 }
 
 /* 代码块样式 */
 .code-block {
-  font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', monospace;
+  font-family: "SF Mono", "JetBrains Mono", "Fira Code", monospace;
   background: #1a1a1d;
   border: 1px solid #2e2e33;
   border-radius: 8px;
@@ -145,7 +157,8 @@ button:disabled {
 }
 
 @keyframes pulse {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
   }
   50% {
@@ -155,7 +168,11 @@ button:disabled {
 
 /* 渐变背景 */
 .bg-gradient-radial {
-  background: radial-gradient(ellipse at top, rgba(249, 77, 58, 0.1) 0%, transparent 50%);
+  background: radial-gradient(
+    ellipse at top,
+    rgba(249, 77, 58, 0.1) 0%,
+    transparent 50%
+  );
 }
 
 /* 图标按钮 */
@@ -193,4 +210,28 @@ button:disabled {
   @apply px-4 py-2 rounded-lg font-medium;
   @apply text-gray-400 hover:text-white hover:bg-dark-600;
   @apply transition-all duration-200;
+}
+
+@media (max-width: 767px) {
+  .input-base,
+  .btn-primary,
+  .btn-secondary,
+  .btn-ghost {
+    min-height: 44px;
+  }
+
+  .btn-primary,
+  .btn-secondary,
+  .btn-ghost {
+    @apply px-4;
+  }
+
+  .icon-button {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
 }

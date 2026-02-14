@@ -1,13 +1,16 @@
-import { invokeCommand } from './invoke';
-import { apiLogger } from './logger';
+import { invokeCommand } from "./invoke";
+import { apiLogger } from "./logger";
 
 // 检查是否在 Tauri 环境中运行
 export function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 // 带日志的 invoke 封装（自动检查 Tauri 环境）
-async function invokeWithLog<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function invokeWithLog<T>(
+  cmd: string,
+  args?: Record<string, unknown>
+): Promise<T> {
   apiLogger.apiCall(cmd, args);
   try {
     const result = await invokeCommand<T>(cmd, args);
@@ -113,7 +116,12 @@ export interface ModelConfig {
   context_window: number | null;
   max_tokens: number | null;
   reasoning: boolean | null;
-  cost: { input: number; output: number; cache_read: number; cache_write: number } | null;
+  cost: {
+    input: number;
+    output: number;
+    cache_read: number;
+    cache_write: number;
+  } | null;
 }
 
 // 渠道配置
@@ -121,7 +129,13 @@ export interface ChannelConfig {
   id: string;
   channel_type: string;
   enabled: boolean;
+  /** 渠道默认配置（顶层字段） */
   config: Record<string, unknown>;
+  /**
+   * 多账号配置（channels.<provider>.accounts）。
+   * 兼容旧结构：为空/缺失时表示单账号渠道。
+   */
+  accounts?: Record<string, Record<string, unknown>>;
 }
 
 // 诊断结果
@@ -145,30 +159,35 @@ export interface AITestResult {
 // API 封装（带日志）
 export const api = {
   // 服务管理
-  getServiceStatus: () => invokeWithLog<ServiceStatus>('get_service_status'),
-  startService: () => invokeWithLog<string>('start_service'),
-  stopService: () => invokeWithLog<string>('stop_service'),
-  restartService: () => invokeWithLog<string>('restart_service'),
-  getLogs: (lines?: number) => invokeWithLog<string[]>('get_logs', { lines }),
+  getServiceStatus: () => invokeWithLog<ServiceStatus>("get_service_status"),
+  startService: () => invokeWithLog<string>("start_service"),
+  stopService: () => invokeWithLog<string>("stop_service"),
+  restartService: () => invokeWithLog<string>("restart_service"),
+  getLogs: (lines?: number) => invokeWithLog<string[]>("get_logs", { lines }),
 
   // 系统信息
-  getSystemInfo: () => invokeWithLog<SystemInfo>('get_system_info'),
-  checkOpenclawInstalled: () => invokeWithLog<boolean>('check_openclaw_installed'),
-  getOpenclawVersion: () => invokeWithLog<string | null>('get_openclaw_version'),
+  getSystemInfo: () => invokeWithLog<SystemInfo>("get_system_info"),
+  checkOpenclawInstalled: () =>
+    invokeWithLog<boolean>("check_openclaw_installed"),
+  getOpenclawVersion: () =>
+    invokeWithLog<string | null>("get_openclaw_version"),
 
   // 配置管理
-  getConfig: () => invokeWithLog<unknown>('get_config'),
-  saveConfig: (config: unknown) => invokeWithLog<string>('save_config', { config }),
-  getEnvValue: (key: string) => invokeWithLog<string | null>('get_env_value', { key }),
+  getConfig: () => invokeWithLog<unknown>("get_config"),
+  saveConfig: (config: unknown) =>
+    invokeWithLog<string>("save_config", { config }),
+  getEnvValue: (key: string) =>
+    invokeWithLog<string | null>("get_env_value", { key }),
   saveEnvValue: (key: string, value: string) =>
-    invokeWithLog<string>('save_env_value', { key, value }),
+    invokeWithLog<string>("save_env_value", { key, value }),
 
   // AI Provider（旧版兼容）
-  getAIProviders: () => invokeWithLog<AIProviderOption[]>('get_ai_providers'),
+  getAIProviders: () => invokeWithLog<AIProviderOption[]>("get_ai_providers"),
 
   // AI 配置（新版）
-  getOfficialProviders: () => invokeWithLog<OfficialProvider[]>('get_official_providers'),
-  getAIConfig: () => invokeWithLog<AIConfigOverview>('get_ai_config'),
+  getOfficialProviders: () =>
+    invokeWithLog<OfficialProvider[]>("get_official_providers"),
+  getAIConfig: () => invokeWithLog<AIConfigOverview>("get_ai_config"),
   saveProvider: (
     providerName: string,
     baseUrl: string,
@@ -176,7 +195,7 @@ export const api = {
     apiType: string,
     models: ModelConfig[]
   ) =>
-    invokeWithLog<string>('save_provider', {
+    invokeWithLog<string>("save_provider", {
       providerName,
       baseUrl,
       apiKey,
@@ -184,22 +203,23 @@ export const api = {
       models,
     }),
   deleteProvider: (providerName: string) =>
-    invokeWithLog<string>('delete_provider', { providerName }),
+    invokeWithLog<string>("delete_provider", { providerName }),
   setPrimaryModel: (modelId: string) =>
-    invokeWithLog<string>('set_primary_model', { modelId }),
+    invokeWithLog<string>("set_primary_model", { modelId }),
   addAvailableModel: (modelId: string) =>
-    invokeWithLog<string>('add_available_model', { modelId }),
+    invokeWithLog<string>("add_available_model", { modelId }),
   removeAvailableModel: (modelId: string) =>
-    invokeWithLog<string>('remove_available_model', { modelId }),
+    invokeWithLog<string>("remove_available_model", { modelId }),
 
   // 渠道
-  getChannelsConfig: () => invokeWithLog<ChannelConfig[]>('get_channels_config'),
+  getChannelsConfig: () =>
+    invokeWithLog<ChannelConfig[]>("get_channels_config"),
   saveChannelConfig: (channel: ChannelConfig) =>
-    invokeWithLog<string>('save_channel_config', { channel }),
+    invokeWithLog<string>("save_channel_config", { channel }),
 
   // 诊断测试
-  runDoctor: () => invokeWithLog<DiagnosticResult[]>('run_doctor'),
-  testAIConnection: () => invokeWithLog<AITestResult>('test_ai_connection'),
+  runDoctor: () => invokeWithLog<DiagnosticResult[]>("run_doctor"),
+  testAIConnection: () => invokeWithLog<AITestResult>("test_ai_connection"),
   testChannel: (channelType: string) =>
-    invokeWithLog<unknown>('test_channel', { channelType }),
+    invokeWithLog<unknown>("test_channel", { channelType }),
 };

@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { invokeCommand as invoke } from '../../lib/invoke';
+import { useEffect, useState, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { invokeCommand as invoke } from "../../lib/invoke";
 import {
   Check,
   Eye,
@@ -20,9 +20,9 @@ import {
   CheckCircle,
   XCircle,
   Pencil,
-} from 'lucide-react';
-import clsx from 'clsx';
-import { aiLogger } from '../../lib/logger';
+} from "lucide-react";
+import clsx from "clsx";
+import { aiLogger } from "../../lib/logger";
 
 // ============ 类型定义 ============
 
@@ -78,7 +78,12 @@ interface ModelConfig {
   context_window: number | null;
   max_tokens: number | null;
   reasoning: boolean | null;
-  cost: { input: number; output: number; cache_read: number; cache_write: number } | null;
+  cost: {
+    input: number;
+    output: number;
+    cache_read: number;
+    cache_write: number;
+  } | null;
 }
 
 interface AITestResult {
@@ -100,79 +105,101 @@ interface ProviderDialogProps {
   editingProvider?: ConfiguredProvider | null;
 }
 
-function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }: ProviderDialogProps) {
+function ProviderDialog({
+  officialProviders,
+  onClose,
+  onSave,
+  editingProvider,
+}: ProviderDialogProps) {
   const isEditing = !!editingProvider;
-  const [step, setStep] = useState<'select' | 'configure'>(isEditing ? 'configure' : 'select');
-  const [selectedOfficial, setSelectedOfficial] = useState<OfficialProvider | null>(() => {
-    if (editingProvider) {
-      return officialProviders.find(p => 
-        editingProvider.name.includes(p.id) || p.id === editingProvider.name
-      ) || null;
-    }
-    return null;
-  });
-  
+  const [step, setStep] = useState<"select" | "configure">(
+    isEditing ? "configure" : "select"
+  );
+  const [selectedOfficial, setSelectedOfficial] =
+    useState<OfficialProvider | null>(() => {
+      if (editingProvider) {
+        return (
+          officialProviders.find(
+            (p) =>
+              editingProvider.name.includes(p.id) ||
+              p.id === editingProvider.name
+          ) || null
+        );
+      }
+      return null;
+    });
+
   // 配置表单
-  const [providerName, setProviderName] = useState(editingProvider?.name || '');
-  const [baseUrl, setBaseUrl] = useState(editingProvider?.base_url || '');
-  const [apiKey, setApiKey] = useState('');
+  const [providerName, setProviderName] = useState(editingProvider?.name || "");
+  const [baseUrl, setBaseUrl] = useState(editingProvider?.base_url || "");
+  const [apiKey, setApiKey] = useState("");
   const [apiType, setApiType] = useState(() => {
     if (editingProvider) {
       const firstModel = editingProvider.models[0];
-      return firstModel?.api_type || 'openai-completions';
+      return firstModel?.api_type || "openai-completions";
     }
-    return 'openai-completions';
+    return "openai-completions";
   });
   const [showApiKey, setShowApiKey] = useState(false);
   const [selectedModels, setSelectedModels] = useState<string[]>(() => {
     if (editingProvider) {
-      return editingProvider.models.map(m => m.id);
+      return editingProvider.models.map((m) => m.id);
     }
     return [];
   });
-  const [customModelId, setCustomModelId] = useState('');
+  const [customModelId, setCustomModelId] = useState("");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [showCustomUrlWarning, setShowCustomUrlWarning] = useState(false);
 
   // 检查是否是官方 Provider 名字但使用了自定义地址
   const isCustomUrlWithOfficialName = (() => {
-    const official = officialProviders.find(p => p.id === providerName);
-    if (official && official.default_base_url && baseUrl !== official.default_base_url) {
+    const official = officialProviders.find((p) => p.id === providerName);
+    if (
+      official &&
+      official.default_base_url &&
+      baseUrl !== official.default_base_url
+    ) {
       return true;
     }
     return false;
   })();
-  
+
   const handleSelectOfficial = (provider: OfficialProvider) => {
     setSelectedOfficial(provider);
     setProviderName(provider.id);
-    setBaseUrl(provider.default_base_url || '');
+    setBaseUrl(provider.default_base_url || "");
     setApiType(provider.api_type);
     // 预选推荐模型
-    const recommended = provider.suggested_models.filter(m => m.recommended).map(m => m.id);
-    setSelectedModels(recommended.length > 0 ? recommended : [provider.suggested_models[0]?.id].filter(Boolean));
+    const recommended = provider.suggested_models
+      .filter((m) => m.recommended)
+      .map((m) => m.id);
+    setSelectedModels(
+      recommended.length > 0
+        ? recommended
+        : [provider.suggested_models[0]?.id].filter(Boolean)
+    );
     setFormError(null);
     setShowCustomUrlWarning(false);
-    setStep('configure');
+    setStep("configure");
   };
 
   const handleSelectCustom = () => {
     setSelectedOfficial(null);
-    setProviderName('');
-    setBaseUrl('');
-    setApiType('openai-completions');
+    setProviderName("");
+    setBaseUrl("");
+    setApiType("openai-completions");
     setSelectedModels([]);
     setFormError(null);
     setShowCustomUrlWarning(false);
-    setStep('configure');
+    setStep("configure");
   };
 
   const toggleModel = (modelId: string) => {
     setFormError(null);
-    setSelectedModels(prev => 
-      prev.includes(modelId) 
-        ? prev.filter(id => id !== modelId)
+    setSelectedModels((prev) =>
+      prev.includes(modelId)
+        ? prev.filter((id) => id !== modelId)
         : [...prev, modelId]
     );
   };
@@ -180,8 +207,8 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
   const addCustomModel = () => {
     if (customModelId && !selectedModels.includes(customModelId)) {
       setFormError(null);
-      setSelectedModels(prev => [...prev, customModelId]);
-      setCustomModelId('');
+      setSelectedModels((prev) => [...prev, customModelId]);
+      setCustomModelId("");
     }
   };
 
@@ -201,9 +228,9 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
 
   const handleSave = async (forceOverride: boolean = false) => {
     setFormError(null);
-    
+
     if (!providerName || !baseUrl || selectedModels.length === 0) {
-      setFormError('请填写完整的 Provider 信息和至少选择一个模型');
+      setFormError("请填写完整的 Provider 信息和至少选择一个模型");
       return;
     }
 
@@ -212,28 +239,36 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
       setShowCustomUrlWarning(true);
       return;
     }
-    
+
     setSaving(true);
     setShowCustomUrlWarning(false);
     try {
       // 构建模型配置
-      const models: ModelConfig[] = selectedModels.map(modelId => {
-        const suggested = selectedOfficial?.suggested_models.find(m => m.id === modelId);
+      const models: ModelConfig[] = selectedModels.map((modelId) => {
+        const suggested = selectedOfficial?.suggested_models.find(
+          (m) => m.id === modelId
+        );
         // 编辑模式下，保留原有模型的配置
-        const existingModel = editingProvider?.models.find(m => m.id === modelId);
+        const existingModel = editingProvider?.models.find(
+          (m) => m.id === modelId
+        );
         return {
           id: modelId,
           name: suggested?.name || existingModel?.name || modelId,
           api: apiType,
-          input: ['text', 'image'],
-          context_window: suggested?.context_window || existingModel?.context_window || 200000,
-          max_tokens: suggested?.max_tokens || existingModel?.max_tokens || 8192,
+          input: ["text", "image"],
+          context_window:
+            suggested?.context_window ||
+            existingModel?.context_window ||
+            200000,
+          max_tokens:
+            suggested?.max_tokens || existingModel?.max_tokens || 8192,
           reasoning: false,
           cost: null,
         };
       });
 
-      await invoke('save_provider', {
+      await invoke("save_provider", {
         providerName,
         baseUrl,
         apiKey: apiKey || null,
@@ -241,12 +276,14 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
         models,
       });
 
-      aiLogger.info(`✓ Provider ${providerName} 已${isEditing ? '更新' : '保存'}`);
+      aiLogger.info(
+        `✓ Provider ${providerName} 已${isEditing ? "更新" : "保存"}`
+      );
       onSave();
       onClose();
     } catch (e) {
-      aiLogger.error('保存 Provider 失败', e);
-      setFormError('保存失败: ' + String(e));
+      aiLogger.error("保存 Provider 失败", e);
+      setFormError("保存失败: " + String(e));
     } finally {
       setSaving(false);
     }
@@ -257,33 +294,42 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      className="fixed inset-0 z-50 overflow-y-auto bg-black/60 p-3 backdrop-blur-sm md:flex md:items-center md:justify-center md:p-4"
       onClick={onClose}
     >
       <motion.div
         initial={{ scale: 0.95, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.95, opacity: 0 }}
-        className="bg-dark-800 rounded-2xl border border-dark-600 w-full max-w-2xl max-h-[85vh] overflow-hidden"
-        onClick={e => e.stopPropagation()}
+        className="mx-auto flex min-h-[calc(100vh-24px)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-dark-600 bg-dark-800 md:min-h-0 md:max-h-[85vh]"
+        onClick={(e) => e.stopPropagation()}
       >
         {/* 头部 */}
-        <div className="px-6 py-4 border-b border-dark-600 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-            {isEditing ? <Settings2 size={20} className="text-claw-400" /> : <Plus size={20} className="text-claw-400" />}
-            {isEditing 
-              ? `编辑 Provider: ${editingProvider?.name}` 
-              : (step === 'select' ? '添加 AI Provider' : `配置 ${selectedOfficial?.name || '自定义 Provider'}`)}
+        <div className="flex items-center justify-between border-b border-dark-600 px-4 py-3 md:px-6 md:py-4">
+          <h2 className="line-clamp-2 flex items-center gap-2 text-base font-semibold text-white md:text-lg">
+            {isEditing ? (
+              <Settings2 size={20} className="text-claw-400" />
+            ) : (
+              <Plus size={20} className="text-claw-400" />
+            )}
+            {isEditing
+              ? `编辑 Provider: ${editingProvider?.name}`
+              : step === "select"
+              ? "添加 AI Provider"
+              : `配置 ${selectedOfficial?.name || "自定义 Provider"}`}
           </h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-white">
+          <button
+            onClick={onClose}
+            className="text-gray-500 hover:text-white min-h-[44px] min-w-[44px]"
+          >
             ✕
           </button>
         </div>
 
         {/* 内容 */}
-        <div className="p-6 overflow-y-auto max-h-[calc(85vh-140px)]">
+        <div className="flex-1 overflow-y-auto p-4 md:p-6">
           <AnimatePresence mode="wait">
-            {step === 'select' ? (
+            {step === "select" ? (
               <motion.div
                 key="select"
                 initial={{ opacity: 0, x: -20 }}
@@ -293,26 +339,33 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
               >
                 {/* 官方 Provider */}
                 <div className="space-y-3">
-                  <h3 className="text-sm font-medium text-gray-400">官方 Provider</h3>
-                  <div className="grid grid-cols-2 gap-3">
-                    {officialProviders.map(provider => (
-                <button
-                  key={provider.id}
+                  <h3 className="text-sm font-medium text-gray-400">
+                    官方 Provider
+                  </h3>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    {officialProviders.map((provider) => (
+                      <button
+                        key={provider.id}
                         onClick={() => handleSelectOfficial(provider)}
                         className="flex items-center gap-3 p-4 rounded-xl bg-dark-700 border border-dark-500 hover:border-claw-500/50 hover:bg-dark-600 transition-all text-left group"
-                >
-                  <span className="text-2xl">{provider.icon}</span>
+                      >
+                        <span className="text-2xl">{provider.icon}</span>
                         <div className="flex-1 min-w-0">
-                          <p className="font-medium text-white truncate">{provider.name}</p>
+                          <p className="font-medium text-white truncate">
+                            {provider.name}
+                          </p>
                           <p className="text-xs text-gray-500 truncate">
                             {provider.suggested_models.length} 个模型
                           </p>
-                    </div>
-                        <ChevronRight size={16} className="text-gray-500 group-hover:text-claw-400 transition-colors" />
-                </button>
+                        </div>
+                        <ChevronRight
+                          size={16}
+                          className="text-gray-500 group-hover:text-claw-400 transition-colors"
+                        />
+                      </button>
                     ))}
-          </div>
-        </div>
+                  </div>
+                </div>
 
                 {/* 自定义 Provider */}
                 <div className="pt-4 border-t border-dark-600">
@@ -326,7 +379,7 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
                 </div>
               </motion.div>
             ) : (
-          <motion.div
+              <motion.div
                 key="configure"
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
@@ -337,16 +390,21 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
                 <div>
                   <label className="block text-sm text-gray-400 mb-2">
                     Provider 名称
-                    <span className="text-gray-600 text-xs ml-2">(用于配置标识，如 anthropic-custom)</span>
+                    <span className="text-gray-600 text-xs ml-2">
+                      (用于配置标识，如 anthropic-custom)
+                    </span>
                   </label>
                   <input
                     type="text"
                     value={providerName}
-                    onChange={e => { setFormError(null); setProviderName(e.target.value); }}
+                    onChange={(e) => {
+                      setFormError(null);
+                      setProviderName(e.target.value);
+                    }}
                     placeholder="如: anthropic-custom, my-openai"
                     className={clsx(
-                      'input-base',
-                      isCustomUrlWithOfficialName && 'border-yellow-500/50'
+                      "input-base",
+                      isCustomUrlWithOfficialName && "border-yellow-500/50"
                     )}
                     disabled={isEditing}
                   />
@@ -358,7 +416,8 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
                   {isCustomUrlWithOfficialName && !isEditing && (
                     <div className="mt-2 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
                       <p className="text-xs text-yellow-400">
-                        ⚠️ 您使用的是官方 Provider 名称，但修改了 API 地址。建议使用不同的名称以避免配置冲突。
+                        ⚠️ 您使用的是官方 Provider 名称，但修改了 API
+                        地址。建议使用不同的名称以避免配置冲突。
                       </p>
                       <button
                         type="button"
@@ -373,17 +432,22 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
 
                 {/* API 地址 */}
                 <div>
-                  <label className="block text-sm text-gray-400 mb-2">API 地址</label>
+                  <label className="block text-sm text-gray-400 mb-2">
+                    API 地址
+                  </label>
                   <input
                     type="text"
                     value={baseUrl}
-                    onChange={e => { setFormError(null); setBaseUrl(e.target.value); }}
+                    onChange={(e) => {
+                      setFormError(null);
+                      setBaseUrl(e.target.value);
+                    }}
                     placeholder="https://api.example.com/v1"
                     className="input-base"
                   />
                 </div>
 
-              {/* API Key */}
+                {/* API Key */}
                 <div>
                   <label className="block text-sm text-gray-400 mb-2">
                     API Key
@@ -403,12 +467,14 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
                   )}
                   <div className="relative">
                     <input
-                      type={showApiKey ? 'text' : 'password'}
+                      type={showApiKey ? "text" : "password"}
                       value={apiKey}
-                      onChange={e => setApiKey(e.target.value)}
-                      placeholder={isEditing && editingProvider?.has_api_key 
-                        ? "留空保持原有 API Key 不变，或输入新的 Key" 
-                        : "sk-..."}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder={
+                        isEditing && editingProvider?.has_api_key
+                          ? "留空保持原有 API Key 不变，或输入新的 Key"
+                          : "sk-..."
+                      }
                       className="input-base pr-10"
                     />
                     <button
@@ -428,52 +494,66 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
 
                 {/* API 类型 */}
                 <div>
-                  <label className="block text-sm text-gray-400 mb-2">API 类型</label>
+                  <label className="block text-sm text-gray-400 mb-2">
+                    API 类型
+                  </label>
                   <select
                     value={apiType}
-                    onChange={e => setApiType(e.target.value)}
+                    onChange={(e) => setApiType(e.target.value)}
                     className="input-base"
                   >
-                    <option value="openai-completions">OpenAI 兼容 (openai-completions)</option>
-                    <option value="anthropic-messages">Anthropic 兼容 (anthropic-messages)</option>
+                    <option value="openai-completions">
+                      OpenAI 兼容 (openai-completions)
+                    </option>
+                    <option value="anthropic-messages">
+                      Anthropic 兼容 (anthropic-messages)
+                    </option>
                   </select>
                 </div>
 
                 {/* 模型选择 */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">
                     选择模型
                     <span className="text-gray-600 text-xs ml-2">
                       (已选 {selectedModels.length} 个)
                     </span>
                   </label>
-                  
+
                   {/* 预设模型 */}
                   {selectedOfficial && (
                     <div className="space-y-2 mb-3">
-                      {selectedOfficial.suggested_models.map(model => (
+                      {selectedOfficial.suggested_models.map((model) => (
                         <button
                           key={model.id}
                           onClick={() => toggleModel(model.id)}
                           className={clsx(
-                            'w-full flex items-center justify-between p-3 rounded-lg border transition-all text-left',
+                            "w-full flex items-center justify-between p-3 rounded-lg border transition-all text-left",
                             selectedModels.includes(model.id)
-                              ? 'bg-claw-500/20 border-claw-500'
-                              : 'bg-dark-700 border-dark-500 hover:border-dark-400'
+                              ? "bg-claw-500/20 border-claw-500"
+                              : "bg-dark-700 border-dark-500 hover:border-dark-400"
                           )}
                         >
                           <div>
-                            <p className={clsx(
-                              'text-sm font-medium',
-                              selectedModels.includes(model.id) ? 'text-white' : 'text-gray-300'
-                            )}>
+                            <p
+                              className={clsx(
+                                "text-sm font-medium",
+                                selectedModels.includes(model.id)
+                                  ? "text-white"
+                                  : "text-gray-300"
+                              )}
+                            >
                               {model.name}
                               {model.recommended && (
-                                <span className="ml-2 text-xs text-claw-400">推荐</span>
+                                <span className="ml-2 text-xs text-claw-400">
+                                  推荐
+                                </span>
                               )}
                             </p>
                             {model.description && (
-                              <p className="text-xs text-gray-500 mt-0.5">{model.description}</p>
+                              <p className="text-xs text-gray-500 mt-0.5">
+                                {model.description}
+                              </p>
                             )}
                           </div>
                           {selectedModels.includes(model.id) && (
@@ -486,13 +566,13 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
 
                   {/* 自定义模型输入 */}
                   <div className="flex gap-2">
-                  <input
-                    type="text"
+                    <input
+                      type="text"
                       value={customModelId}
-                      onChange={e => setCustomModelId(e.target.value)}
+                      onChange={(e) => setCustomModelId(e.target.value)}
                       placeholder="输入自定义模型 ID"
                       className="input-base flex-1"
-                      onKeyDown={e => e.key === 'Enter' && addCustomModel()}
+                      onKeyDown={(e) => e.key === "Enter" && addCustomModel()}
                     />
                     <button
                       onClick={addCustomModel}
@@ -504,11 +584,21 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
                   </div>
 
                   {/* 已添加的自定义模型 */}
-                  {selectedModels.filter(id => !selectedOfficial?.suggested_models.find(m => m.id === id)).length > 0 && (
+                  {selectedModels.filter(
+                    (id) =>
+                      !selectedOfficial?.suggested_models.find(
+                        (m) => m.id === id
+                      )
+                  ).length > 0 && (
                     <div className="mt-3 flex flex-wrap gap-2">
                       {selectedModels
-                        .filter(id => !selectedOfficial?.suggested_models.find(m => m.id === id))
-                        .map(modelId => (
+                        .filter(
+                          (id) =>
+                            !selectedOfficial?.suggested_models.find(
+                              (m) => m.id === id
+                            )
+                        )
+                        .map((modelId) => (
                           <span
                             key={modelId}
                             className="inline-flex items-center gap-1 px-2 py-1 bg-dark-600 rounded-lg text-sm text-gray-300"
@@ -558,31 +648,31 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
                   <motion.div
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg space-y-3"
+                    className="space-y-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-4"
                   >
-                    <p className="text-yellow-400 text-sm">
-                      ⚠️ 您使用的是官方 Provider 名称 "{providerName}"，但修改了 API 地址。
-                      这可能导致配置被 OpenClaw 内置设置覆盖。
+                    <p className="text-sm text-yellow-400">
+                      ⚠️ 您使用的是官方 Provider 名称 "{providerName}"，但修改了
+                      API 地址。 这可能导致配置被 OpenClaw 内置设置覆盖。
                     </p>
-                    <p className="text-yellow-300 text-sm">
+                    <p className="text-sm text-yellow-300">
                       建议使用不同的名称，如 "{suggestedName}"
                     </p>
-                    <div className="flex gap-2 pt-2">
+                    <div className="flex flex-wrap gap-2 pt-2">
                       <button
                         onClick={handleApplySuggestedName}
-                        className="btn-secondary text-sm py-2 px-3"
+                        className="btn-secondary px-3 py-2 text-sm"
                       >
                         使用建议名称
                       </button>
                       <button
                         onClick={() => handleSave(true)}
-                        className="btn-primary text-sm py-2 px-3"
+                        className="btn-primary px-3 py-2 text-sm"
                       >
                         仍然保存
                       </button>
                       <button
                         onClick={() => setShowCustomUrlWarning(false)}
-                        className="text-sm text-gray-400 hover:text-white px-3"
+                        className="min-h-[44px] px-3 text-sm text-gray-400 hover:text-white"
                       >
                         取消
                       </button>
@@ -592,31 +682,40 @@ function ProviderDialog({ officialProviders, onClose, onSave, editingProvider }:
               </motion.div>
             )}
           </AnimatePresence>
-              </div>
+        </div>
 
         {/* 底部按钮 */}
-        <div className="px-6 py-4 border-t border-dark-600 flex justify-between">
-          {step === 'configure' && !isEditing && (
-            <button
-              onClick={() => setStep('select')}
-              className="btn-secondary"
-            >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-dark-600 px-4 py-3 md:px-6 md:py-4">
+          {step === "configure" && !isEditing && (
+            <button onClick={() => setStep("select")} className="btn-secondary">
               返回
             </button>
           )}
-          <div className="flex-1" />
-          <div className="flex gap-3">
-            <button onClick={onClose} className="btn-secondary">
+          <div className="hidden flex-1 md:block" />
+          <div className="flex w-full flex-wrap gap-2 md:w-auto md:justify-end md:gap-3">
+            <button
+              onClick={onClose}
+              className="btn-secondary flex-1 md:flex-none"
+            >
               取消
             </button>
-            {step === 'configure' && !showCustomUrlWarning && (
+            {step === "configure" && !showCustomUrlWarning && (
               <button
                 onClick={() => handleSave()}
-                disabled={saving || !providerName || !baseUrl || selectedModels.length === 0}
-                className="btn-primary flex items-center gap-2"
+                disabled={
+                  saving ||
+                  !providerName ||
+                  !baseUrl ||
+                  selectedModels.length === 0
+                }
+                className="btn-primary flex flex-1 items-center justify-center gap-2 md:flex-none"
               >
-                {saving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
-                {isEditing ? '更新' : '保存'}
+                {saving ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Check size={16} />
+                )}
+                {isEditing ? "更新" : "保存"}
               </button>
             )}
           </div>
@@ -636,19 +735,28 @@ interface ProviderCardProps {
   onEdit: (provider: ConfiguredProvider) => void;
 }
 
-function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, onEdit }: ProviderCardProps) {
+function ProviderCard({
+  provider,
+  officialProviders,
+  onSetPrimary,
+  onRefresh,
+  onEdit,
+}: ProviderCardProps) {
   const [expanded, setExpanded] = useState(true);
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // 查找官方 Provider 信息
-  const officialInfo = officialProviders.find(p => 
-    provider.name.includes(p.id) || p.id === provider.name
+  const officialInfo = officialProviders.find(
+    (p) => provider.name.includes(p.id) || p.id === provider.name
   );
 
   // 检查是否使用了自定义地址
-  const isCustomUrl = officialInfo && officialInfo.default_base_url && provider.base_url !== officialInfo.default_base_url;
+  const isCustomUrl =
+    officialInfo &&
+    officialInfo.default_base_url &&
+    provider.base_url !== officialInfo.default_base_url;
 
   const handleDeleteClick = () => {
     setShowDeleteConfirm(true);
@@ -659,11 +767,11 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
     setDeleting(true);
     setDeleteError(null);
     try {
-      await invoke('delete_provider', { providerName: provider.name });
+      await invoke("delete_provider", { providerName: provider.name });
       setShowDeleteConfirm(false);
       onRefresh();
     } catch (e) {
-      setDeleteError('删除失败: ' + String(e));
+      setDeleteError("删除失败: " + String(e));
     } finally {
       setDeleting(false);
     }
@@ -686,7 +794,7 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
         className="flex items-center gap-3 p-4 cursor-pointer hover:bg-dark-600/50 transition-colors"
         onClick={() => setExpanded(!expanded)}
       >
-        <span className="text-xl">{officialInfo?.icon || '🔌'}</span>
+        <span className="text-xl">{officialInfo?.icon || "🔌"}</span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <h3 className="font-medium text-white">{provider.name}</h3>
@@ -704,7 +812,9 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
           <p className="text-xs text-gray-500 truncate">{provider.base_url}</p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-sm text-gray-500">{provider.models.length} 模型</span>
+          <span className="text-sm text-gray-500">
+            {provider.models.length} 模型
+          </span>
           <motion.div animate={{ rotate: expanded ? 180 : 0 }}>
             <ChevronDown size={18} className="text-gray-500" />
           </motion.div>
@@ -716,7 +826,7 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
         {expanded && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
+            animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             className="border-t border-dark-600"
           >
@@ -733,27 +843,35 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
 
               {/* 模型列表 */}
               <div className="space-y-2">
-                {provider.models.map(model => (
+                {provider.models.map((model) => (
                   <div
                     key={model.full_id}
-                      className={clsx(
-                      'flex items-center justify-between p-3 rounded-lg border transition-all',
+                    className={clsx(
+                      "flex items-center justify-between p-3 rounded-lg border transition-all",
                       model.is_primary
-                        ? 'bg-claw-500/10 border-claw-500/50'
-                        : 'bg-dark-600 border-dark-500'
+                        ? "bg-claw-500/10 border-claw-500/50"
+                        : "bg-dark-600 border-dark-500"
                     )}
                   >
                     <div className="flex items-center gap-3">
-                      <Cpu size={16} className={model.is_primary ? 'text-claw-400' : 'text-gray-500'} />
+                      <Cpu
+                        size={16}
+                        className={
+                          model.is_primary ? "text-claw-400" : "text-gray-500"
+                        }
+                      />
                       <div>
-                        <p className={clsx(
-                            'text-sm font-medium',
-                          model.is_primary ? 'text-white' : 'text-gray-300'
-                        )}>
+                        <p
+                          className={clsx(
+                            "text-sm font-medium",
+                            model.is_primary ? "text-white" : "text-gray-300"
+                          )}
+                        >
                           {model.name}
                           {model.is_primary && (
                             <span className="ml-2 text-xs text-claw-400">
-                              <Star size={12} className="inline -mt-0.5" /> 主模型
+                              <Star size={12} className="inline -mt-0.5" />{" "}
+                              主模型
                             </span>
                           )}
                         </p>
@@ -780,7 +898,8 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
                   className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg space-y-3"
                 >
                   <p className="text-red-400 text-sm">
-                    ⚠️ 确定要删除 Provider "{provider.name}" 吗？这将同时删除其下所有模型配置。
+                    ⚠️ 确定要删除 Provider "{provider.name}"
+                    吗？这将同时删除其下所有模型配置。
                   </p>
                   {deleteError && (
                     <p className="text-red-300 text-sm bg-red-500/20 p-2 rounded">
@@ -793,7 +912,11 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
                       disabled={deleting}
                       className="btn-primary text-sm py-2 px-3 bg-red-500 hover:bg-red-600 flex items-center gap-1"
                     >
-                      {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                      {deleting ? (
+                        <Loader2 size={14} className="animate-spin" />
+                      ) : (
+                        <Trash2 size={14} />
+                      )}
                       确认删除
                     </button>
                     <button
@@ -825,7 +948,11 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
                     disabled={deleting}
                     className="flex items-center gap-1 text-sm text-red-400 hover:text-red-300 transition-colors"
                   >
-                    {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                    {deleting ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Trash2 size={14} />
+                    )}
                     删除 Provider
                   </button>
                 </div>
@@ -842,10 +969,13 @@ function ProviderCard({ provider, officialProviders, onSetPrimary, onRefresh, on
 
 export function AIConfig() {
   const [loading, setLoading] = useState(true);
-  const [officialProviders, setOfficialProviders] = useState<OfficialProvider[]>([]);
+  const [officialProviders, setOfficialProviders] = useState<
+    OfficialProvider[]
+  >([]);
   const [aiConfig, setAiConfig] = useState<AIConfigOverview | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const [editingProvider, setEditingProvider] = useState<ConfiguredProvider | null>(null);
+  const [editingProvider, setEditingProvider] =
+    useState<ConfiguredProvider | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<AITestResult | null>(null);
@@ -861,11 +991,11 @@ export function AIConfig() {
   };
 
   const runAITest = async () => {
-    aiLogger.action('测试 AI 连接');
+    aiLogger.action("测试 AI 连接");
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await invoke<AITestResult>('test_ai_connection');
+      const result = await invoke<AITestResult>("test_ai_connection");
       setTestResult(result);
       if (result.success) {
         aiLogger.info(`✅ AI 连接测试成功，延迟: ${result.latency_ms}ms`);
@@ -873,11 +1003,11 @@ export function AIConfig() {
         aiLogger.warn(`❌ AI 连接测试失败: ${result.error}`);
       }
     } catch (e) {
-      aiLogger.error('AI 测试失败', e);
+      aiLogger.error("AI 测试失败", e);
       setTestResult({
         success: false,
-        provider: 'unknown',
-        model: 'unknown',
+        provider: "unknown",
+        model: "unknown",
         response: null,
         error: String(e),
         latency_ms: null,
@@ -888,19 +1018,21 @@ export function AIConfig() {
   };
 
   const loadData = useCallback(async () => {
-    aiLogger.info('AIConfig 组件加载数据...');
+    aiLogger.info("AIConfig 组件加载数据...");
     setError(null);
-    
+
     try {
       const [officials, config] = await Promise.all([
-        invoke<OfficialProvider[]>('get_official_providers'),
-        invoke<AIConfigOverview>('get_ai_config'),
+        invoke<OfficialProvider[]>("get_official_providers"),
+        invoke<AIConfigOverview>("get_ai_config"),
       ]);
       setOfficialProviders(officials);
       setAiConfig(config);
-      aiLogger.info(`加载完成: ${officials.length} 个官方 Provider, ${config.configured_providers.length} 个已配置`);
+      aiLogger.info(
+        `加载完成: ${officials.length} 个官方 Provider, ${config.configured_providers.length} 个已配置`
+      );
     } catch (e) {
-      aiLogger.error('加载 AI 配置失败', e);
+      aiLogger.error("加载 AI 配置失败", e);
       setError(String(e));
     } finally {
       setLoading(false);
@@ -913,12 +1045,12 @@ export function AIConfig() {
 
   const handleSetPrimary = async (modelId: string) => {
     try {
-      await invoke('set_primary_model', { modelId });
+      await invoke("set_primary_model", { modelId });
       aiLogger.info(`主模型已设置为: ${modelId}`);
       loadData();
     } catch (e) {
-      aiLogger.error('设置主模型失败', e);
-      alert('设置失败: ' + e);
+      aiLogger.error("设置主模型失败", e);
+      alert("设置失败: " + e);
     }
   };
 
@@ -931,14 +1063,14 @@ export function AIConfig() {
   }
 
   return (
-    <div className="h-full overflow-y-auto scroll-container pr-2">
+    <div className="h-full overflow-y-auto scroll-container pr-0 md:pr-2">
       <div className="max-w-4xl space-y-6">
         {/* 错误提示 */}
         {error && (
           <div className="bg-red-500/20 border border-red-500/50 rounded-xl p-4 text-red-300">
             <p className="font-medium mb-1">加载配置失败</p>
             <p className="text-sm text-red-400">{error}</p>
-            <button 
+            <button
               onClick={loadData}
               className="mt-2 text-sm text-red-300 hover:text-white underline"
             >
@@ -976,7 +1108,9 @@ export function AIConfig() {
             <div className="flex-1">
               <p className="text-sm text-gray-400">当前主模型</p>
               {aiConfig?.primary_model ? (
-                <p className="text-lg font-medium text-white">{aiConfig.primary_model}</p>
+                <p className="text-lg font-medium text-white">
+                  {aiConfig.primary_model}
+                </p>
               ) : (
                 <p className="text-lg text-gray-500">未设置</p>
               )}
@@ -995,8 +1129,8 @@ export function AIConfig() {
               className="btn-secondary flex items-center gap-2"
             >
               {testing ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
                 <Zap size={16} />
               )}
               测试连接
@@ -1009,8 +1143,10 @@ export function AIConfig() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               className={clsx(
-                'mt-4 p-4 rounded-xl',
-                testResult.success ? 'bg-green-500/10 border border-green-500/30' : 'bg-red-500/10 border border-red-500/30'
+                "mt-4 p-4 rounded-xl",
+                testResult.success
+                  ? "bg-green-500/10 border border-green-500/30"
+                  : "bg-red-500/10 border border-red-500/30"
               )}
             >
               <div className="flex items-center gap-3 mb-2">
@@ -1020,11 +1156,18 @@ export function AIConfig() {
                   <XCircle size={20} className="text-red-400" />
                 )}
                 <div className="flex-1">
-                  <p className={clsx('font-medium', testResult.success ? 'text-green-400' : 'text-red-400')}>
-                    {testResult.success ? '连接成功' : '连接失败'}
+                  <p
+                    className={clsx(
+                      "font-medium",
+                      testResult.success ? "text-green-400" : "text-red-400"
+                    )}
+                  >
+                    {testResult.success ? "连接成功" : "连接失败"}
                   </p>
                   {testResult.latency_ms && (
-                    <p className="text-xs text-gray-400">响应时间: {testResult.latency_ms}ms</p>
+                    <p className="text-xs text-gray-400">
+                      响应时间: {testResult.latency_ms}ms
+                    </p>
                   )}
                 </div>
                 <button
@@ -1034,18 +1177,22 @@ export function AIConfig() {
                   关闭
                 </button>
               </div>
-              
+
               {testResult.response && (
                 <div className="mt-2 p-3 bg-dark-700 rounded-lg">
                   <p className="text-xs text-gray-400 mb-1">AI 响应:</p>
-                  <p className="text-sm text-white whitespace-pre-wrap">{testResult.response}</p>
+                  <p className="text-sm text-white whitespace-pre-wrap">
+                    {testResult.response}
+                  </p>
                 </div>
               )}
-              
+
               {testResult.error && (
                 <div className="mt-2 p-3 bg-red-500/10 rounded-lg">
                   <p className="text-xs text-red-400 mb-1">错误信息:</p>
-                  <p className="text-sm text-red-300 whitespace-pre-wrap">{testResult.error}</p>
+                  <p className="text-sm text-red-300 whitespace-pre-wrap">
+                    {testResult.error}
+                  </p>
                 </div>
               )}
             </motion.div>
@@ -1074,7 +1221,7 @@ export function AIConfig() {
             </div>
           ) : (
             <div className="space-y-3">
-              {aiConfig?.configured_providers.map(provider => (
+              {aiConfig?.configured_providers.map((provider) => (
                 <ProviderCard
                   key={provider.name}
                   provider={provider}
@@ -1100,14 +1247,14 @@ export function AIConfig() {
             </h3>
             <div className="bg-dark-700 rounded-xl border border-dark-500 p-4">
               <div className="flex flex-wrap gap-2">
-                {aiConfig.available_models.map(modelId => (
+                {aiConfig.available_models.map((modelId) => (
                   <span
                     key={modelId}
                     className={clsx(
-                      'inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm',
+                      "inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm",
                       modelId === aiConfig.primary_model
-                        ? 'bg-claw-500/20 text-claw-300 border border-claw-500/30'
-                        : 'bg-dark-600 text-gray-300'
+                        ? "bg-claw-500/20 text-claw-300 border border-claw-500/30"
+                        : "bg-dark-600 text-gray-300"
                     )}
                   >
                     {modelId === aiConfig.primary_model && <Star size={12} />}
@@ -1123,8 +1270,14 @@ export function AIConfig() {
         <div className="bg-dark-700/50 rounded-xl p-4 border border-dark-500">
           <h4 className="text-sm font-medium text-gray-400 mb-2">配置说明</h4>
           <ul className="text-sm text-gray-500 space-y-1">
-            <li>• Provider 配置保存在 <code className="text-claw-400">~/.openclaw/openclaw.json</code></li>
-            <li>• 支持官方 Provider（Anthropic、OpenAI、Kimi 等）和自定义 OpenAI/Anthropic 兼容 API</li>
+            <li>
+              • Provider 配置保存在{" "}
+              <code className="text-claw-400">~/.openclaw/openclaw.json</code>
+            </li>
+            <li>
+              • 支持官方 Provider（Anthropic、OpenAI、Kimi 等）和自定义
+              OpenAI/Anthropic 兼容 API
+            </li>
             <li>• 主模型用于 Agent 的默认推理，可随时切换</li>
             <li>• 修改配置后需要重启服务生效</li>
           </ul>

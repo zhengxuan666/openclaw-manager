@@ -837,6 +837,20 @@ async fn dispatch_command(command: &str, args: &Value) -> Result<Value, String> 
                 .ok_or_else(|| "缺少参数: config".to_string())?;
             Ok(json!(config::save_config(cfg).await?))
         }
+        "get_agents_list" => Ok(config::get_agents_list().await?),
+        "save_agents_list" => {
+            let agents_list = read_arg(args, &["agentsList", "agents_list", "agentsListJson", "agents_list_json"])
+                .cloned()
+                .ok_or_else(|| "缺少参数: agentsList".to_string())?;
+            Ok(json!(config::save_agents_list(agents_list).await?))
+        }
+        "get_bindings" => Ok(config::get_bindings().await?),
+        "save_bindings" => {
+            let bindings = read_arg(args, &["bindings"])
+                .cloned()
+                .ok_or_else(|| "缺少参数: bindings".to_string())?;
+            Ok(json!(config::save_bindings(bindings).await?))
+        }
         "get_env_value" => {
             let key = require_string(args, &["key"], "key")?;
             Ok(json!(config::get_env_value(key).await?))
@@ -848,7 +862,9 @@ async fn dispatch_command(command: &str, args: &Value) -> Result<Value, String> 
         }
         "get_or_create_gateway_token" => Ok(json!(config::get_or_create_gateway_token().await?)),
         "get_dashboard_url" => Ok(json!(config::get_dashboard_url().await?)),
+
         "get_official_providers" => Ok(json!(config::get_official_providers().await?)),
+
         "get_ai_config" => Ok(json!(config::get_ai_config().await?)),
         "save_provider" => {
             let provider_name = require_string(args, &["providerName", "provider_name"], "providerName")?;
