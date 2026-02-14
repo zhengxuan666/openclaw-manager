@@ -28,4 +28,18 @@ npm-debug.log*
 # Tauri
 src-tauri/target/
 src-tauri/Cargo.lock
+
+# Local assistant/tooling artifacts
 .snow/
+**/.snow/
+
+# Backup files (never commit)
+*.bak
+*.bak.*
+*backup*
+backups/
+**/backups/
+
+# OpenClaw config backups
+openclaw.json.bak*
+clawdbot.json.bak*
