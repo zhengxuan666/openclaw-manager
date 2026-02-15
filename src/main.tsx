@@ -1,20 +1,36 @@
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App';
-import './styles/globals.css';
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+import "./styles/globals.css";
 // 确保 logger 初始化（会在控制台显示启动信息）
-import './lib/logger';
+import "./lib/logger";
+
+const updateViewportHeightVar = () => {
+  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+  document.documentElement.style.setProperty(
+    "--app-viewport-height",
+    `${Math.round(viewportHeight)}px`
+  );
+};
+
+updateViewportHeightVar();
+window.addEventListener("resize", updateViewportHeightVar, { passive: true });
+window.addEventListener("orientationchange", updateViewportHeightVar, {
+  passive: true,
+});
+window.visualViewport?.addEventListener("resize", updateViewportHeightVar);
+window.visualViewport?.addEventListener("scroll", updateViewportHeightVar);
 
 console.log(
-  '%c🦞 OpenClaw Manager  启动',
-  'background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-size: 16px; padding: 8px 16px; border-radius: 4px; font-weight: bold;'
+  "%c🦞 OpenClaw Manager  启动",
+  "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-size: 16px; padding: 8px 16px; border-radius: 4px; font-weight: bold;"
 );
 console.log(
-  '%c提示: 打开开发者工具 (Cmd+Option+I / Ctrl+Shift+I) 可以查看详细日志',
-  'color: #888; font-size: 12px;'
+  "%c提示: 打开开发者工具 (Cmd+Option+I / Ctrl+Shift+I) 可以查看详细日志",
+  "color: #888; font-size: 12px;"
 );
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>

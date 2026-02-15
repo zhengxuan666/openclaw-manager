@@ -11,6 +11,7 @@ import {
   X,
   Loader2,
   ChevronRight,
+  ChevronDown,
   Apple,
   Bell,
   Eye,
@@ -584,6 +585,7 @@ export function Channels() {
   const [visiblePasswords, setVisiblePasswords] = useState<Set<string>>(
     new Set()
   );
+  const [mobileChannelListOpen, setMobileChannelListOpen] = useState(false);
 
   const togglePasswordVisibility = (fieldKey: string) => {
     setVisiblePasswords((prev) => {
@@ -647,6 +649,7 @@ export function Channels() {
     bindingsMap?: Record<string, string>
   ) => {
     setSelectedChannel(channelId);
+    setMobileChannelListOpen(false);
     setTestResult(null);
     setShowClearConfirm(false);
     setNewAccountId("");
@@ -1047,85 +1050,115 @@ export function Channels() {
   }
 
   return (
-    <div className="h-full overflow-y-auto scroll-container pr-0 md:pr-2">
-      <div className="max-w-6xl">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {/* 渠道列表 */}
-          <div className="md:col-span-1 space-y-2">
-            <h3 className="text-sm font-medium text-gray-400 mb-3 px-1">
-              消息渠道
-            </h3>
-            {channels.map((channel) => {
-              const info = channelInfo[channel.channel_type] || {
-                name: channel.channel_type,
-                icon: <MessageSquare size={20} />,
-                color: "text-gray-400",
-                fields: [],
-              };
-              const isSelected = selectedChannel === channel.id;
-              const isConfigured = hasValidConfig(channel);
-
-              return (
-                <button
-                  key={channel.id}
-                  onClick={() => hydrateChannelEditor(channel.id)}
+    <div className="module-page-shell">
+      <div className="max-w-6xl min-w-0">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3 md:gap-6">
+          {/* 渠道列表（移动端可折叠，避免挤压主内容） */}
+          <div className="order-1 space-y-2 md:order-1 md:col-span-1">
+            <div className="mb-2 flex items-center justify-between md:mb-3">
+              <h3 className="px-1 text-sm font-medium text-gray-400">
+                消息渠道
+              </h3>
+              <button
+                type="button"
+                onClick={() => setMobileChannelListOpen((prev) => !prev)}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-700 px-3 text-xs text-gray-300 transition-colors hover:border-dark-400 hover:text-white md:hidden"
+              >
+                <span className="max-w-[9rem] truncate">
+                  {currentInfo ? `当前：${currentInfo.name}` : "切换渠道"}
+                </span>
+                <ChevronDown
+                  size={14}
                   className={clsx(
-                    "w-full flex items-center gap-3 p-4 rounded-xl border transition-all",
-                    isSelected
-                      ? "bg-dark-600 border-claw-500"
-                      : "bg-dark-700 border-dark-500 hover:border-dark-400"
+                    "transition-transform",
+                    mobileChannelListOpen ? "rotate-180" : "rotate-0"
                   )}
-                >
-                  <div
+                />
+              </button>
+            </div>
+
+            <div
+              className={clsx(
+                "space-y-2",
+                mobileChannelListOpen ? "block" : "hidden md:block"
+              )}
+            >
+              {channels.map((channel) => {
+                const info = channelInfo[channel.channel_type] || {
+                  name: channel.channel_type,
+                  icon: <MessageSquare size={20} />,
+                  color: "text-gray-400",
+                  fields: [],
+                };
+                const isSelected = selectedChannel === channel.id;
+                const isConfigured = hasValidConfig(channel);
+
+                return (
+                  <button
+                    key={channel.id}
+                    onClick={() => hydrateChannelEditor(channel.id)}
                     className={clsx(
-                      "w-10 h-10 rounded-lg flex items-center justify-center",
-                      isConfigured ? "bg-dark-500" : "bg-dark-600"
+                      "flex min-h-[44px] w-full min-w-0 items-center gap-3 rounded-xl border p-3 transition-all sm:p-4",
+                      isSelected
+                        ? "border-claw-500 bg-dark-600"
+                        : "border-dark-500 bg-dark-700 hover:border-dark-400"
                     )}
                   >
-                    <span className={info.color}>{info.icon}</span>
-                  </div>
-                  <div className="flex-1 text-left">
-                    <p
+                    <div
                       className={clsx(
-                        "text-sm font-medium",
-                        isSelected ? "text-white" : "text-gray-300"
+                        "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg",
+                        isConfigured ? "bg-dark-500" : "bg-dark-600"
                       )}
                     >
-                      {info.name}
-                    </p>
-                    <div className="flex items-center gap-2 mt-1">
-                      {isConfigured ? (
-                        <>
-                          <Check size={12} className="text-green-400" />
-                          <span className="text-xs text-green-400">已配置</span>
-                        </>
-                      ) : (
-                        <>
-                          <X size={12} className="text-gray-500" />
-                          <span className="text-xs text-gray-500">未配置</span>
-                        </>
-                      )}
+                      <span className={info.color}>{info.icon}</span>
                     </div>
-                  </div>
-                  <ChevronRight
-                    size={16}
-                    className={isSelected ? "text-claw-400" : "text-gray-600"}
-                  />
-                </button>
-              );
-            })}
+                    <div className="min-w-0 flex-1 text-left">
+                      <p
+                        className={clsx(
+                          "truncate text-sm font-medium",
+                          isSelected ? "text-white" : "text-gray-300"
+                        )}
+                      >
+                        {info.name}
+                      </p>
+                      <div className="mt-1 flex items-center gap-2">
+                        {isConfigured ? (
+                          <>
+                            <Check size={12} className="text-green-400" />
+                            <span className="text-xs text-green-400">
+                              已配置
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <X size={12} className="text-gray-500" />
+                            <span className="text-xs text-gray-500">
+                              未配置
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <ChevronRight
+                      size={16}
+                      className={isSelected ? "text-claw-400" : "text-gray-600"}
+                    />
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* 配置面板 */}
-          <div className="md:col-span-2">
+          <div className="order-2 min-w-0 md:order-2 md:col-span-2">
             {currentChannel && currentInfo ? (
               <motion.div
                 key={selectedChannel}
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
-                className="bg-dark-700 rounded-2xl p-6 border border-dark-500 space-y-6"
+                className="space-y-6 rounded-2xl border border-dark-500 bg-dark-700 p-4 sm:p-6"
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
                   <div
                     className={clsx(
                       "w-10 h-10 rounded-lg flex items-center justify-center bg-dark-500",
@@ -1139,7 +1172,7 @@ export function Channels() {
                       配置 {currentInfo.name}
                     </h3>
                     {currentInfo.helpText && (
-                      <p className="text-xs text-gray-500">
+                      <p className="text-xs text-gray-500 break-words">
                         {currentInfo.helpText}
                       </p>
                     )}
@@ -1215,7 +1248,7 @@ export function Channels() {
                             </div>
                             <p className="text-xs text-gray-500 mt-2">
                               或手动执行:{" "}
-                              <code className="px-1.5 py-0.5 bg-dark-600 rounded text-gray-400">
+                              <code className="break-all rounded bg-dark-600 px-1.5 py-0.5 text-gray-400">
                                 openclaw plugins install @m1heng-clawd/feishu
                               </code>
                             </p>
@@ -1289,7 +1322,7 @@ export function Channels() {
                                 onClick={() =>
                                   togglePasswordVisibility(visibilityKey)
                                 }
-                                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white transition-colors"
+                                className="absolute right-1 top-1/2 inline-flex min-h-[44px] min-w-[44px] -translate-y-1/2 items-center justify-center text-gray-500 transition-colors hover:text-white"
                                 title={
                                   visiblePasswords.has(visibilityKey)
                                     ? "隐藏"
@@ -1334,11 +1367,11 @@ export function Channels() {
                           </p>
                         </div>
                       </div>
-                      <div className="flex gap-2">
+                      <div className="flex flex-col gap-2 sm:flex-row">
                         <button
                           onClick={handleWhatsAppLogin}
                           disabled={loginLoading}
-                          className="flex-1 btn-secondary flex items-center justify-center gap-2"
+                          className="btn-secondary flex min-h-[44px] w-full items-center justify-center gap-2 sm:flex-1"
                         >
                           {loginLoading ? (
                             <Loader2 size={16} className="animate-spin" />
@@ -1350,7 +1383,7 @@ export function Channels() {
                         <button
                           onClick={handleQuickTest}
                           disabled={testing}
-                          className="btn-secondary flex items-center justify-center gap-2 px-4"
+                          className="btn-secondary inline-flex min-h-[44px] w-full items-center justify-center gap-2 px-4 sm:w-auto"
                           title="刷新状态"
                         >
                           {testing ? (
@@ -1376,7 +1409,7 @@ export function Channels() {
                   </div>
 
                   {supportsMultiAccountManage ? (
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                       <input
                         value={newAccountId}
                         onChange={(e) => setNewAccountId(e.target.value)}
@@ -1385,7 +1418,7 @@ export function Channels() {
                       />
                       <button
                         onClick={handleAddAccount}
-                        className="btn-secondary flex items-center gap-1 px-3"
+                        className="btn-secondary inline-flex w-full items-center justify-center gap-1 px-3 sm:w-auto"
                       >
                         <Plus size={14} />
                         新增
@@ -1421,7 +1454,7 @@ export function Channels() {
                             )}
                           >
                             <button
-                              className="flex-1 flex items-center gap-3 text-left"
+                              className="flex min-h-[44px] min-w-0 flex-1 items-center gap-3 text-left"
                               onClick={() => setSelectedAccountId(accountId)}
                             >
                               <Bot
@@ -1431,10 +1464,10 @@ export function Channels() {
                                 }
                               />
                               <div className="min-w-0 flex-1">
-                                <p className="text-sm text-white truncate">
+                                <p className="truncate text-sm text-white">
                                   {accountId}
                                 </p>
-                                <p className="text-xs text-gray-500 truncate flex items-center gap-1">
+                                <p className="flex items-center gap-1 truncate text-xs text-gray-500">
                                   <Link2 size={12} />
                                   绑定 Agent：{boundAgentId || "未绑定"}
                                 </p>
@@ -1444,7 +1477,7 @@ export function Channels() {
                             {supportsMultiAccountManage && (
                               <button
                                 onClick={() => handleDeleteAccount(accountId)}
-                                className="text-red-400 hover:text-red-300 p-1"
+                                className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg p-1 text-red-400 transition-colors hover:bg-red-500/10 hover:text-red-300"
                                 title="删除账号"
                               >
                                 <Trash2 size={15} />
@@ -1495,7 +1528,7 @@ export function Channels() {
                             <option key={agentId} value={agentId} />
                           ))}
                         </datalist>
-                        <p className="text-xs text-gray-500 mt-1">
+                        <p className="mt-1 break-all text-xs text-gray-500">
                           会写回 bindings：{currentChannel.id}/
                           {selectedAccountId} → agentId
                         </p>
@@ -1562,7 +1595,7 @@ export function Channels() {
                                   onClick={() =>
                                     togglePasswordVisibility(visibilityKey)
                                   }
-                                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white transition-colors"
+                                  className="absolute right-1 top-1/2 inline-flex min-h-[44px] min-w-[44px] -translate-y-1/2 items-center justify-center text-gray-500 transition-colors hover:text-white"
                                   title={
                                     visiblePasswords.has(visibilityKey)
                                       ? "隐藏"
@@ -1603,11 +1636,11 @@ export function Channels() {
                 </section>
 
                 {/* 操作按钮 */}
-                <div className="pt-4 border-t border-dark-500 flex flex-wrap items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3 border-t border-dark-500 pt-4">
                   <button
                     onClick={handleSave}
                     disabled={saving}
-                    className="btn-primary flex items-center gap-2"
+                    className="btn-primary inline-flex min-h-[44px] w-full items-center justify-center gap-2 sm:w-auto"
                   >
                     {saving ? (
                       <Loader2 size={16} className="animate-spin" />
@@ -1620,7 +1653,7 @@ export function Channels() {
                   <button
                     onClick={handleQuickTest}
                     disabled={testing}
-                    className="btn-secondary flex items-center gap-2"
+                    className="btn-secondary inline-flex min-h-[44px] w-full items-center justify-center gap-2 sm:w-auto"
                   >
                     {testing ? (
                       <Loader2 size={16} className="animate-spin" />
@@ -1634,7 +1667,7 @@ export function Channels() {
                     <button
                       onClick={handleShowClearConfirm}
                       disabled={clearing}
-                      className="btn-secondary flex items-center gap-2 text-red-400 hover:text-red-300 hover:border-red-500/50"
+                      className="btn-secondary inline-flex min-h-[44px] w-full items-center justify-center gap-2 text-red-400 hover:border-red-500/50 hover:text-red-300 sm:w-auto"
                     >
                       {clearing ? (
                         <Loader2 size={16} className="animate-spin" />
@@ -1644,17 +1677,17 @@ export function Channels() {
                       清空配置
                     </button>
                   ) : (
-                    <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/20 rounded-lg border border-red-500/50">
+                    <div className="flex w-full flex-wrap items-center gap-2 rounded-lg border border-red-500/50 bg-red-500/20 px-3 py-1.5 sm:w-auto">
                       <span className="text-sm text-red-300">确定清空？</span>
                       <button
                         onClick={handleClearConfig}
-                        className="px-2 py-1 text-xs bg-red-500 text-white rounded hover:bg-red-600 transition-colors"
+                        className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded bg-red-500 px-3 py-1 text-xs text-white transition-colors hover:bg-red-600 sm:flex-none"
                       >
                         确定
                       </button>
                       <button
                         onClick={() => setShowClearConfirm(false)}
-                        className="px-2 py-1 text-xs bg-dark-600 text-gray-300 rounded hover:bg-dark-500 transition-colors"
+                        className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded bg-dark-600 px-3 py-1 text-xs text-gray-300 transition-colors hover:bg-dark-500 sm:flex-none"
                       >
                         取消
                       </button>

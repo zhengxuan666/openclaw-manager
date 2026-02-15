@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   invokeCommand as invoke,
@@ -78,6 +78,7 @@ function App() {
   const [showUpdateBanner, setShowUpdateBanner] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [updateResult, setUpdateResult] = useState<UpdateResult | null>(null);
+  const mainScrollRef = useRef<HTMLElement | null>(null);
 
   const refreshAuthStatus = useCallback(async () => {
     if (!webMode) {
@@ -203,6 +204,16 @@ function App() {
     return () => clearInterval(interval);
   }, [webMode, authenticated]);
 
+  // 兜底：页面切换后重置主滚动容器，避免某些子页面滚动逻辑污染首屏位置
+  useEffect(() => {
+    const mainEl = mainScrollRef.current;
+    if (!mainEl) {
+      return;
+    }
+
+    mainEl.scrollTo({ top: 0, behavior: "auto" });
+  }, [currentPage]);
+
   const handleSetupComplete = useCallback(() => {
     appLogger.info("安装向导完成");
     checkEnvironment();
@@ -276,7 +287,7 @@ function App() {
 
   if (!authChecked || isReady === null) {
     return (
-      <div className="flex h-screen bg-dark-900 items-center justify-center">
+      <div className="app-viewport-height flex bg-dark-900 items-center justify-center">
         <div className="fixed inset-0 bg-gradient-radial pointer-events-none" />
         <div className="relative z-10 text-center">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-xl bg-gradient-to-br from-brand-500 to-purple-600 mb-4 animate-pulse">
@@ -290,7 +301,7 @@ function App() {
 
   if (webMode && !authenticated) {
     return (
-      <div className="flex h-screen bg-dark-900 items-center justify-center px-4">
+      <div className="app-viewport-height flex bg-dark-900 items-center justify-center px-4">
         <div className="w-full max-w-md bg-dark-700 rounded-2xl border border-dark-500 p-6 space-y-4">
           <h2 className="text-white text-xl font-semibold">
             OpenClaw Manager Web
@@ -338,7 +349,7 @@ function App() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-dark-900 overflow-hidden md:flex-row">
+    <div className="app-viewport-height flex flex-col bg-dark-900 overflow-hidden md:flex-row">
       <div className="fixed inset-0 bg-gradient-radial pointer-events-none" />
 
       <AnimatePresence>
@@ -347,7 +358,7 @@ function App() {
             initial={{ opacity: 0, y: -50 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -50 }}
-            className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-r from-claw-600 to-purple-600 shadow-lg"
+            className="fixed left-0 right-0 z-50 top-[calc(var(--mobile-header-height)+0.25rem)] bg-gradient-to-r from-claw-600 to-purple-600 shadow-lg md:top-0"
           >
             <div className="mx-auto flex w-full max-w-4xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-start gap-3">
@@ -421,20 +432,16 @@ function App() {
         serviceStatus={serviceStatus}
       />
 
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <Header currentPage={currentPage} />
-        {webMode && (
-          <div className="flex items-center justify-between border-b border-dark-700 bg-dark-800/40 px-4 py-2 text-xs text-gray-400 md:px-6">
-            <span>Web 管理模式</span>
-            <button
-              onClick={handleLogout}
-              className="hover:text-white transition-colors"
-            >
-              退出登录
-            </button>
-          </div>
-        )}
-        <main className="flex-1 min-w-0 overflow-hidden p-4 md:p-6">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <Header
+          currentPage={currentPage}
+          webMode={webMode}
+          onLogout={webMode ? handleLogout : undefined}
+        />
+        <main
+          ref={mainScrollRef}
+          className="flex-1 min-h-0 min-w-0 overflow-hidden px-4 pb-[var(--mobile-bottom-nav-height)] pt-[calc(var(--mobile-header-height)+0.75rem)] md:p-6 md:pb-6 md:pt-6"
+        >
           {renderPage()}
         </main>
       </div>

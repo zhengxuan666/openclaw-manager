@@ -147,7 +147,7 @@ export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
   const needsSetup = envStatus && !envStatus.ready;
 
   return (
-    <div className="h-full overflow-y-auto scroll-container pr-0 md:pr-2">
+    <div className="module-page-shell">
       <motion.div
         variants={containerVariants}
         initial="hidden"

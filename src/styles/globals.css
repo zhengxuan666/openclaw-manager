@@ -20,6 +20,29 @@ body,
   width: 100%;
 }
 
+:root {
+  --app-viewport-height: 100vh;
+  --mobile-header-height: calc(env(safe-area-inset-top) + 6.75rem);
+  --mobile-bottom-nav-height: calc(5.5rem + env(safe-area-inset-bottom));
+}
+
+.app-viewport-height {
+  height: var(--app-viewport-height);
+}
+
+@supports (height: 100dvh) {
+  :root {
+    --app-viewport-height: 100dvh;
+  }
+}
+
+@media (min-width: 768px) {
+  :root {
+    --mobile-header-height: 0px;
+    --mobile-bottom-nav-height: 0px;
+  }
+}
+
 body {
   font-family: "SF Pro Display", -apple-system, BlinkMacSystemFont,
     "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -104,6 +127,30 @@ button:disabled {
   overflow-x: hidden;
   min-width: 0;
   scrollbar-gutter: stable;
+}
+
+/* 模块页面通用外层容器，统一移动端高度与安全区 */
+.module-page-shell {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 0;
+  padding-bottom: max(env(safe-area-inset-bottom), 0px);
+}
+
+.module-page-shell--fixed {
+  overflow: hidden;
+}
+
+@media (min-width: 768px) {
+  .module-page-shell {
+    padding-right: 0.5rem;
+    padding-bottom: 0;
+  }
 }
 
 /* 代码块样式 */

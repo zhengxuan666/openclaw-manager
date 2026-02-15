@@ -53,7 +53,7 @@ export function Testing() {
   const failedCount = diagnosticResults.filter((r) => !r.passed).length;
 
   return (
-    <div className="h-full overflow-y-auto scroll-container pr-0 md:pr-2">
+    <div className="module-page-shell">
       <div className="max-w-4xl space-y-6">
         {/* 诊断测试 */}
         <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">

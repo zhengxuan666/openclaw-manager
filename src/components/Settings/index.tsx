@@ -144,7 +144,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   };
 
   return (
-    <div className="h-full overflow-y-auto scroll-container pr-0 md:pr-2">
+    <div className="module-page-shell">
       <div className="max-w-2xl space-y-6">
         {/* 身份配置 */}
         <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
