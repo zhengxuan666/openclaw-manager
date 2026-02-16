@@ -12,13 +12,16 @@ use tauri::command;
 
 /// 解析 openclaw 配置（JSON / JSON5）
 fn parse_openclaw_config_content(content: &str) -> Result<Value, String> {
-    match serde_json::from_str(content) {
+    // 优先兼容官方 JSON5 语法（注释、尾逗号等），同时保留对标准 JSON 的兜底兼容
+    match json5::from_str(content) {
         Ok(v) => Ok(v),
-        Err(json_err) => {
-            // 兼容官方 JSON5 配置格式（注释、尾逗号等）
-            json5::from_str(content)
-                .map_err(|json5_err| format!("解析配置文件失败(JSON: {}; JSON5: {})", json_err, json5_err))
-        }
+        Err(json5_err) => match serde_json::from_str(content) {
+            Ok(v) => Ok(v),
+            Err(json_err) => Err(format!(
+                "JSON/JSON5 解析失败: JSON5 错误: {}; JSON 错误: {}",
+                json5_err, json_err
+            )),
+        },
     }
 }
 
@@ -1551,5 +1554,107 @@ pub async fn install_feishu_plugin() -> Result<String, String> {
             error!("[飞书插件] ✗ 安装失败: {}", e);
             Err(format!("安装飞书插件失败: {}\n\n请手动执行: openclaw plugins install @m1heng-clawd/feishu", e))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_openclaw_config_content;
+
+    #[test]
+    fn parse_pure_json_config() {
+        let content = r#"{"gateway":{"auth":{"token":"test-token"}}}"#;
+        let parsed = parse_openclaw_config_content(content).expect("纯 JSON 配置应可读取");
+
+        assert_eq!(
+            parsed
+                .pointer("/gateway/auth/token")
+                .and_then(|v| v.as_str()),
+            Some("test-token")
+        );
+    }
+
+    #[test]
+    fn parse_json5_with_comments_and_trailing_comma() {
+        let content = r#"
+        {
+          // JSON5 注释
+          gateway: {
+            auth: {
+              token: "json5-token",
+            },
+          },
+        }
+        "#;
+
+        let parsed = parse_openclaw_config_content(content).expect("JSON5 配置应可读取");
+
+        assert_eq!(
+            parsed
+                .pointer("/gateway/auth/token")
+                .and_then(|v| v.as_str()),
+            Some("json5-token")
+        );
+    }
+
+    #[test]
+    fn parse_invalid_config_should_return_clear_error() {
+        let content = "{ gateway: { auth: { token: } } }";
+        let err = parse_openclaw_config_content(content).expect_err("非法配置应返回错误");
+
+        assert!(
+            err.contains("JSON/JSON5 解析失败"),
+            "错误信息应包含 JSON/JSON5 解析失败，实际: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_json5_should_preserve_core_config_fields() {
+        let content = r#"
+        {
+          agents: {
+            defaults: {
+              model: { primary: "anthropic/claude-opus-4-5-20251101" },
+            },
+          },
+          gateway: {
+            auth: {
+              token: "gateway-token",
+            },
+          },
+          channels: {
+            telegram: {
+              accounts: [
+                {
+                  name: "main",
+                  token: "tg-token",
+                },
+              ],
+            },
+          },
+        }
+        "#;
+
+        let parsed = parse_openclaw_config_content(content).expect("回归字段应可正确解析");
+
+        assert_eq!(
+            parsed
+                .pointer("/agents/defaults/model/primary")
+                .and_then(|v| v.as_str()),
+            Some("anthropic/claude-opus-4-5-20251101")
+        );
+        assert_eq!(
+            parsed
+                .pointer("/gateway/auth/token")
+                .and_then(|v| v.as_str()),
+            Some("gateway-token")
+        );
+        assert_eq!(
+            parsed
+                .pointer("/channels/telegram/accounts/0/token")
+                .and_then(|v| v.as_str()),
+            Some("tg-token")
+        );
     }
 }
