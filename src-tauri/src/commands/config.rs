@@ -66,8 +66,32 @@ fn load_env_file_vars() -> HashMap<String, String> {
     vars
 }
 
+fn format_config_path(path: &str) -> String {
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn escape_json_pointer_segment(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+fn join_config_path(path: &str, segment: &str) -> String {
+    if path.is_empty() {
+        format!("/{}", segment)
+    } else {
+        format!("{}/{}", path, segment)
+    }
+}
+
 /// 字符串中的变量替换：支持 ${VAR}；支持 $${VAR} 作为字面量 ${VAR}
-fn replace_config_vars_in_string(input: &str, env_file_vars: &HashMap<String, String>) -> Result<String, String> {
+fn replace_config_vars_in_string(
+    input: &str,
+    env_file_vars: &HashMap<String, String>,
+    config_path: &str,
+) -> Result<String, String> {
     let mut output = String::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
@@ -84,6 +108,11 @@ fn replace_config_vars_in_string(input: &str, env_file_vars: &HashMap<String, St
                     output.push('}');
                     i = end + 1;
                     continue;
+                } else {
+                    return Err(format!(
+                        "配置变量替换失败: 路径 {} 存在无法解析的占位符（缺少右花括号）",
+                        format_config_path(config_path)
+                    ));
                 }
             }
 
@@ -93,17 +122,31 @@ fn replace_config_vars_in_string(input: &str, env_file_vars: &HashMap<String, St
                     let end = i + 2 + end_rel;
                     let var_name = input[i + 2..end].trim();
                     if var_name.is_empty() {
-                        return Err("配置变量替换失败: 变量名不能为空".to_string());
+                        return Err(format!(
+                            "配置变量替换失败: 路径 {} 变量名不能为空",
+                            format_config_path(config_path)
+                        ));
                     }
 
                     let var_value = std::env::var(var_name)
                         .ok()
                         .or_else(|| env_file_vars.get(var_name).cloned())
-                        .ok_or_else(|| format!("配置变量替换失败: 缺失变量 {}", var_name))?;
+                        .ok_or_else(|| {
+                            format!(
+                                "配置变量替换失败: 路径 {} 缺失变量 {}",
+                                format_config_path(config_path),
+                                var_name
+                            )
+                        })?;
 
                     output.push_str(&var_value);
                     i = end + 1;
                     continue;
+                } else {
+                    return Err(format!(
+                        "配置变量替换失败: 路径 {} 存在无法解析的占位符（缺少右花括号）",
+                        format_config_path(config_path)
+                    ));
                 }
             }
         }
@@ -117,19 +160,25 @@ fn replace_config_vars_in_string(input: &str, env_file_vars: &HashMap<String, St
 }
 
 /// 递归替换 Value 中所有字符串变量，支持对象/数组
-fn replace_config_vars(value: &mut Value, env_file_vars: &HashMap<String, String>) -> Result<(), String> {
+fn replace_config_vars(
+    value: &mut Value,
+    env_file_vars: &HashMap<String, String>,
+    path: &str,
+) -> Result<(), String> {
     match value {
         Value::String(s) => {
-            *s = replace_config_vars_in_string(s, env_file_vars)?;
+            *s = replace_config_vars_in_string(s, env_file_vars, path)?;
         }
         Value::Array(arr) => {
-            for item in arr.iter_mut() {
-                replace_config_vars(item, env_file_vars)?;
+            for (idx, item) in arr.iter_mut().enumerate() {
+                let child_path = join_config_path(path, &idx.to_string());
+                replace_config_vars(item, env_file_vars, &child_path)?;
             }
         }
         Value::Object(map) => {
-            for (_, v) in map.iter_mut() {
-                replace_config_vars(v, env_file_vars)?;
+            for (key, v) in map.iter_mut() {
+                let child_path = join_config_path(path, &escape_json_pointer_segment(key));
+                replace_config_vars(v, env_file_vars, &child_path)?;
             }
         }
         _ => {}
@@ -142,7 +191,7 @@ fn replace_config_vars(value: &mut Value, env_file_vars: &HashMap<String, String
 fn load_openclaw_config() -> Result<Value, String> {
     let mut config = load_openclaw_config_raw()?;
     let env_file_vars = load_env_file_vars();
-    replace_config_vars(&mut config, &env_file_vars)?;
+    replace_config_vars(&mut config, &env_file_vars, "")?;
     Ok(config)
 }
 
@@ -151,10 +200,6 @@ fn load_openclaw_config() -> Result<Value, String> {
 /// - 未知字段：serde 默认忽略未知字段，不导致整体失败
 /// - 类型错误：返回可定位语义错误，便于前端 toast
 fn normalize_and_validate_config(config: &Value) -> Result<Value, String> {
-    serde_json::from_value::<OpenClawConfig>(config.clone()).map_err(|e| {
-        format!("配置结构无效（请检查字段类型，例如 agents.list / bindings）: {}", e)
-    })?;
-
     // 针对 agents.list / bindings 给出更聚焦的类型错误语义
     if let Some(agents_list) = config.pointer("/agents/list") {
         if !agents_list.is_array() {
@@ -167,6 +212,10 @@ fn normalize_and_validate_config(config: &Value) -> Result<Value, String> {
             return Err("bindings 结构无效：必须为数组或对象".to_string());
         }
     }
+
+    serde_json::from_value::<OpenClawConfig>(config.clone()).map_err(|e| {
+        format!("配置结构无效（请检查字段类型，例如 agents.list / bindings）: {}", e)
+    })?;
 
     Ok(config.clone())
 }
@@ -222,10 +271,7 @@ fn merge_gateway_critical_fields(target: &mut Value, source: &Value) {
 #[command]
 pub async fn save_config(mut config: Value) -> Result<String, String> {
     info!("[保存配置] 保存 openclaw.json 配置...");
-    debug!(
-        "[保存配置] 配置内容: {}",
-        serde_json::to_string_pretty(&config).unwrap_or_default()
-    );
+    debug!("[保存配置] 请求包含字段: {}", config.as_object().map(|o| o.len()).unwrap_or(0));
 
     // 先做结构化校验，保证类型错误能提前返回明确语义
     config = normalize_and_validate_config(&config)?;
@@ -696,10 +742,9 @@ pub async fn get_ai_config() -> Result<AIConfigOverview, String> {
 
     let config = load_openclaw_config()?;
     let normalized = normalize_and_validate_config(&config)?;
-
     debug!(
-        "[AI 配置] 配置内容: {}",
-        serde_json::to_string_pretty(&normalized).unwrap_or_default()
+        "[AI 配置] 配置根字段数: {}",
+        normalized.as_object().map(|o| o.len()).unwrap_or(0)
     );
 
     // 解析主模型
@@ -1653,8 +1698,121 @@ pub async fn install_feishu_plugin() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_and_validate_config, parse_openclaw_config_content};
-    use serde_json::json;
+    use super::{
+        load_env_file_vars, normalize_and_validate_config, parse_openclaw_config_content,
+        replace_config_vars, save_openclaw_config,
+    };
+    use crate::utils::{file as file_utils, platform as platform_utils};
+    use serde_json::{json, Value};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("测试环境锁不应中毒")
+    }
+
+    struct EnvGuard {
+        key: String,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+
+        fn remove(key: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.previous {
+                unsafe {
+                    std::env::set_var(&self.key, prev);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(&self.key);
+                }
+            }
+        }
+    }
+
+    struct TempHomeGuard {
+        previous_home: Option<String>,
+        temp_home_dir: PathBuf,
+    }
+
+    impl TempHomeGuard {
+        fn new() -> Self {
+            let previous_home = std::env::var("HOME").ok();
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let temp_home_dir = std::env::temp_dir().join(format!("openclaw-config-test-home-{}", unique));
+            fs::create_dir_all(temp_home_dir.join(".openclaw"))
+                .expect("应可创建临时 home 目录");
+
+            unsafe {
+                std::env::set_var("HOME", temp_home_dir.to_string_lossy().to_string());
+            }
+
+            Self {
+                previous_home,
+                temp_home_dir,
+            }
+        }
+
+        fn write_openclaw_env(&self, content: &str) {
+            let env_path = self.temp_home_dir.join(".openclaw").join("env");
+            fs::write(env_path, content).expect("应可写入临时 env 文件");
+        }
+    }
+
+    impl Drop for TempHomeGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.previous_home {
+                unsafe {
+                    std::env::set_var("HOME", prev);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var("HOME");
+                }
+            }
+            let _ = fs::remove_dir_all(&self.temp_home_dir);
+        }
+    }
+
+    fn apply_replacement(mut value: Value) -> Result<Value, String> {
+        let env_file_vars = load_env_file_vars();
+        replace_config_vars(&mut value, &env_file_vars, "")?;
+        Ok(value)
+    }
 
     #[test]
     fn parse_pure_json_config() {
@@ -1751,6 +1909,154 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("tg-token")
         );
+    }
+
+    #[test]
+    fn replace_vars_in_json_config_should_work() {
+        let _env_lock = test_env_lock();
+        let _process_guard = EnvGuard::set("OPENCLAW_TEST_JSON_TOKEN", "json-token-from-process");
+        let _env_guard = EnvGuard::remove("OPENCLAW_TEST_JSON_SUFFIX");
+
+        let home_guard = TempHomeGuard::new();
+        home_guard.write_openclaw_env("export OPENCLAW_TEST_JSON_SUFFIX=-from-env\n");
+
+        let parsed = parse_openclaw_config_content(
+            r#"{"gateway":{"auth":{"token":"${OPENCLAW_TEST_JSON_TOKEN}${OPENCLAW_TEST_JSON_SUFFIX}"}}}"#,
+        )
+        .expect("JSON 配置应可解析");
+
+        let replaced = apply_replacement(parsed).expect("JSON 配置变量应可替换");
+        assert_eq!(
+            replaced
+                .pointer("/gateway/auth/token")
+                .and_then(|v| v.as_str()),
+            Some("json-token-from-process-from-env")
+        );
+    }
+
+    #[test]
+    fn replace_vars_in_json5_config_should_work() {
+        let _env_lock = test_env_lock();
+        let _process_guard = EnvGuard::set("OPENCLAW_TEST_JSON5_TOKEN", "json5-token-from-process");
+        let _env_guard = EnvGuard::remove("OPENCLAW_TEST_JSON5_SUFFIX");
+
+        let home_guard = TempHomeGuard::new();
+        home_guard.write_openclaw_env("export OPENCLAW_TEST_JSON5_SUFFIX=-json5-env\n");
+
+        let parsed = parse_openclaw_config_content(
+            r#"
+            {
+              // JSON5 注释
+              gateway: {
+                auth: {
+                  token: "${OPENCLAW_TEST_JSON5_TOKEN}${OPENCLAW_TEST_JSON5_SUFFIX}",
+                },
+              },
+            }
+            "#,
+        )
+        .expect("JSON5 配置应可解析");
+
+        let replaced = apply_replacement(parsed).expect("JSON5 配置变量应可替换");
+        assert_eq!(
+            replaced
+                .pointer("/gateway/auth/token")
+                .and_then(|v| v.as_str()),
+            Some("json5-token-from-process-json5-env")
+        );
+    }
+
+    #[test]
+    fn replace_multiple_placeholders_in_single_string_should_work() {
+        let _env_lock = test_env_lock();
+        let _api_guard = EnvGuard::set("OPENCLAW_MULTI_A", "A");
+        let _token_guard = EnvGuard::set("OPENCLAW_MULTI_B", "B");
+        let _secret_guard = EnvGuard::set("OPENCLAW_MULTI_C", "C");
+
+        let parsed = parse_openclaw_config_content(
+            r#"{"models":{"providers":{"demo":{"apiKey":"prefix-${OPENCLAW_MULTI_A}-${OPENCLAW_MULTI_B}-${OPENCLAW_MULTI_C}-suffix"}}}}"#,
+        )
+        .expect("配置应可解析");
+
+        let replaced = apply_replacement(parsed).expect("多占位符应可替换");
+        assert_eq!(
+            replaced
+                .pointer("/models/providers/demo/apiKey")
+                .and_then(|v| v.as_str()),
+            Some("prefix-A-B-C-suffix")
+        );
+    }
+
+    #[test]
+    fn missing_variable_should_return_error_with_path_and_name() {
+        let _env_lock = test_env_lock();
+        let _guard = EnvGuard::remove("OPENCLAW_MISSING_VAR_TEST");
+
+        let parsed = parse_openclaw_config_content(
+            r#"{"models":{"providers":{"anthropic":{"apiKey":"${OPENCLAW_MISSING_VAR_TEST}"}}}}"#,
+        )
+        .expect("配置应可解析");
+
+        let err = apply_replacement(parsed).expect_err("缺失变量应返回错误");
+        assert!(
+            err.contains("/models/providers/anthropic/apiKey"),
+            "错误信息应包含配置路径，实际: {}",
+            err
+        );
+        assert!(
+            err.contains("OPENCLAW_MISSING_VAR_TEST"),
+            "错误信息应包含缺失变量名，实际: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn replacement_should_not_mutate_raw_placeholder_text_for_writeback() {
+        let _env_lock = test_env_lock();
+        let _process_guard = EnvGuard::set("OPENCLAW_WRITEBACK_VAR", "super-secret-value");
+
+        let raw = parse_openclaw_config_content(
+            r#"{"models":{"providers":{"anthropic":{"baseUrl":"https://api.anthropic.com","apiKey":"${OPENCLAW_WRITEBACK_VAR}"}}}}"#,
+        )
+        .expect("配置应可解析");
+
+        let replaced = apply_replacement(raw.clone()).expect("读取期应可替换");
+        assert_eq!(
+            replaced
+                .pointer("/models/providers/anthropic/apiKey")
+                .and_then(|v| v.as_str()),
+            Some("super-secret-value")
+        );
+        assert_eq!(
+            raw.pointer("/models/providers/anthropic/apiKey")
+                .and_then(|v| v.as_str()),
+            Some("${OPENCLAW_WRITEBACK_VAR}")
+        );
+
+        let serialized = serde_json::to_string_pretty(&raw).expect("原始配置应可序列化");
+        assert!(
+            serialized.contains("${OPENCLAW_WRITEBACK_VAR}"),
+            "写回内容应保留占位符"
+        );
+        assert!(
+            !serialized.contains("super-secret-value"),
+            "写回内容不应包含替换后的敏感值"
+        );
+
+        let home_guard = TempHomeGuard::new();
+        let config_path = platform_utils::get_config_file_path();
+        file_utils::write_file(
+            &config_path,
+            r#"{"models":{"providers":{"anthropic":{"baseUrl":"https://api.anthropic.com","apiKey":"${OPENCLAW_WRITEBACK_VAR}"}}}}"#,
+        )
+        .expect("应可写入测试配置");
+
+        save_openclaw_config(&raw).expect("写回原始配置应成功");
+        let saved = file_utils::read_file(&config_path).expect("应可读取写回结果");
+        assert!(saved.contains("${OPENCLAW_WRITEBACK_VAR}"));
+        assert!(!saved.contains("super-secret-value"));
+
+        let _ = home_guard;
     }
 
     #[test]
