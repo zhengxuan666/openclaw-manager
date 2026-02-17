@@ -1,7 +1,7 @@
 use crate::models::{
-    AIConfigOverview, ChannelConfig, ConfiguredModel, ConfiguredProvider,
-    ModelConfig, ModelCostConfig, OfficialProvider, OpenClawConfig,
-    ProviderConfig, SuggestedModel,
+    AIConfigOverview, BindingEntry, BindingsConfig, ChannelConfig, ConfiguredModel,
+    ConfiguredProvider, ModelConfig, ModelCostConfig, OfficialProvider,
+    OpenClawConfig, ProviderConfig, SuggestedModel,
 };
 use crate::utils::{file, platform, shell};
 use log::{debug, error, info, warn};
@@ -146,13 +146,40 @@ fn load_openclaw_config() -> Result<Value, String> {
     Ok(config)
 }
 
+/// 将 Value 按 OpenClawConfig 结构做一次校验，确保核心字段语义稳定。
+/// - 缺失字段：依赖读取端默认逻辑（不强行改写原始 JSON）
+/// - 未知字段：serde 默认忽略未知字段，不导致整体失败
+/// - 类型错误：返回可定位语义错误，便于前端 toast
+fn normalize_and_validate_config(config: &Value) -> Result<Value, String> {
+    serde_json::from_value::<OpenClawConfig>(config.clone()).map_err(|e| {
+        format!("配置结构无效（请检查字段类型，例如 agents.list / bindings）: {}", e)
+    })?;
+
+    // 针对 agents.list / bindings 给出更聚焦的类型错误语义
+    if let Some(agents_list) = config.pointer("/agents/list") {
+        if !agents_list.is_array() {
+            return Err("agents.list 结构无效：必须为数组".to_string());
+        }
+    }
+
+    if let Some(bindings) = config.get("bindings") {
+        if !bindings.is_array() && !bindings.is_object() {
+            return Err("bindings 结构无效：必须为数组或对象".to_string());
+        }
+    }
+
+    Ok(config.clone())
+}
+
 /// 保存 openclaw.json 配置
 fn save_openclaw_config(config: &Value) -> Result<(), String> {
     let config_path = platform::get_config_file_path();
-    
-    let content =
-        serde_json::to_string_pretty(config).map_err(|e| format!("序列化配置失败: {}", e))?;
-    
+
+    let normalized = normalize_and_validate_config(config)?;
+
+    let content = serde_json::to_string_pretty(&normalized)
+        .map_err(|e| format!("序列化配置失败: {}", e))?;
+
     file::write_file(&config_path, &content).map_err(|e| format!("写入配置文件失败: {}", e))
 }
 
@@ -160,7 +187,7 @@ fn save_openclaw_config(config: &Value) -> Result<(), String> {
 #[command]
 pub async fn get_config() -> Result<Value, String> {
     info!("[获取配置] 读取 openclaw.json 配置...");
-    let result = load_openclaw_config();
+    let result = load_openclaw_config().and_then(|config| normalize_and_validate_config(&config));
     match &result {
         Ok(_) => info!("[获取配置] ✓ 配置读取成功"),
         Err(e) => error!("[获取配置] ✗ 配置读取失败: {}", e),
@@ -200,6 +227,9 @@ pub async fn save_config(mut config: Value) -> Result<String, String> {
         serde_json::to_string_pretty(&config).unwrap_or_default()
     );
 
+    // 先做结构化校验，保证类型错误能提前返回明确语义
+    config = normalize_and_validate_config(&config)?;
+
     // 兼容旧前端可能只提交部分字段：保留既有 gateway 关键字段，避免 port/bind/trustedProxies/reload 丢失
     if let Ok(existing) = load_openclaw_config_raw() {
         merge_gateway_critical_fields(&mut config, &existing);
@@ -221,17 +251,25 @@ pub async fn save_config(mut config: Value) -> Result<String, String> {
 #[command]
 pub async fn get_agents_list() -> Result<Value, String> {
     info!("[Agents List] 获取 agents.list...");
-    let config = load_openclaw_config()?;
-    Ok(config
-        .pointer("/agents/list")
-        .cloned()
-        .unwrap_or_else(|| json!([])))
+    let config = load_openclaw_config_raw()?;
+
+    let typed: OpenClawConfig = serde_json::from_value(config).map_err(|e| {
+        format!("agents.list 结构无效（应为数组）: {}", e)
+    })?;
+
+    serde_json::to_value(typed.agents.list)
+        .map_err(|e| format!("agents.list 序列化失败: {}", e))
 }
 
 /// 保存 agents.list（全量写入）
 #[command]
 pub async fn save_agents_list(agents_list: Value) -> Result<String, String> {
     info!("[Agents List] 保存 agents.list...");
+
+    // 显式校验：要求数组结构，便于前端定位错误
+    if !agents_list.is_array() {
+        return Err("agents.list 结构无效：必须为数组".to_string());
+    }
 
     let mut config = load_openclaw_config_raw()?;
 
@@ -246,15 +284,20 @@ pub async fn save_agents_list(agents_list: Value) -> Result<String, String> {
     Ok("agents.list 已保存".to_string())
 }
 
-/// 获取 bindings（向后兼容：不存在时返回 {}）
+/// 获取 bindings（向后兼容：不存在时返回 []）
 #[command]
 pub async fn get_bindings() -> Result<Value, String> {
     info!("[Bindings] 获取 bindings...");
-    let config = load_openclaw_config()?;
-    Ok(config
-        .get("bindings")
-        .cloned()
-        .unwrap_or_else(|| json!({})))
+    let config = load_openclaw_config_raw()?;
+
+    let typed: OpenClawConfig = serde_json::from_value(config)
+        .map_err(|e| format!("bindings 结构无效（应为数组或对象）: {}", e))?;
+
+    Ok(typed
+        .bindings
+        .as_ref()
+        .map(|b| b.as_value())
+        .unwrap_or_else(|| json!([])))
 }
 
 /// 保存 bindings（全量写入）
@@ -262,8 +305,18 @@ pub async fn get_bindings() -> Result<Value, String> {
 pub async fn save_bindings(bindings: Value) -> Result<String, String> {
     info!("[Bindings] 保存 bindings...");
 
+    // 显式校验：仅接受数组或对象
+    if !bindings.is_array() && !bindings.is_object() {
+        return Err("bindings 结构无效：必须为数组或对象".to_string());
+    }
+
     let mut config = load_openclaw_config_raw()?;
-    config["bindings"] = bindings;
+
+    // 使用强类型做一次转换校验，返回更清晰错误语义
+    let typed_bindings: BindingsConfig = serde_json::from_value(bindings)
+        .map_err(|e| format!("bindings 结构无效：{}", e))?;
+
+    config["bindings"] = typed_bindings.into_value();
     save_openclaw_config(&config)?;
 
     info!("[Bindings] ✓ bindings 保存成功");
@@ -642,17 +695,22 @@ pub async fn get_ai_config() -> Result<AIConfigOverview, String> {
     info!("[AI 配置] 配置文件路径: {}", config_path);
 
     let config = load_openclaw_config()?;
-    debug!("[AI 配置] 配置内容: {}", serde_json::to_string_pretty(&config).unwrap_or_default());
+    let normalized = normalize_and_validate_config(&config)?;
+
+    debug!(
+        "[AI 配置] 配置内容: {}",
+        serde_json::to_string_pretty(&normalized).unwrap_or_default()
+    );
 
     // 解析主模型
-    let primary_model = config
+    let primary_model = normalized
         .pointer("/agents/defaults/model/primary")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     info!("[AI 配置] 主模型: {:?}", primary_model);
 
     // 解析可用模型列表
-    let available_models: Vec<String> = config
+    let available_models: Vec<String> = normalized
         .pointer("/agents/defaults/models")
         .and_then(|v| v.as_object())
         .map(|obj| obj.keys().cloned().collect())
@@ -662,15 +720,15 @@ pub async fn get_ai_config() -> Result<AIConfigOverview, String> {
     // 解析已配置的 Provider
     let mut configured_providers: Vec<ConfiguredProvider> = Vec::new();
 
-    let providers_value = config.pointer("/models/providers");
+    let providers_value = normalized.pointer("/models/providers");
     info!("[AI 配置] providers 节点存在: {}", providers_value.is_some());
 
     if let Some(providers) = providers_value.and_then(|v| v.as_object()) {
         info!("[AI 配置] 找到 {} 个 Provider", providers.len());
-        
+
         for (provider_name, provider_config) in providers {
             info!("[AI 配置] 解析 Provider: {}", provider_name);
-            
+
             let base_url = provider_config
                 .get("baseUrl")
                 .and_then(|v| v.as_str())
@@ -692,8 +750,12 @@ pub async fn get_ai_config() -> Result<AIConfigOverview, String> {
 
             // 解析模型列表
             let models_array = provider_config.get("models").and_then(|v| v.as_array());
-            info!("[AI 配置] Provider {} 的 models 数组: {:?}", provider_name, models_array.map(|a| a.len()));
-            
+            info!(
+                "[AI 配置] Provider {} 的 models 数组: {:?}",
+                provider_name,
+                models_array.map(|a| a.len())
+            );
+
             let models: Vec<ConfiguredModel> = models_array
                 .map(|arr| {
                     arr.iter()
@@ -729,7 +791,11 @@ pub async fn get_ai_config() -> Result<AIConfigOverview, String> {
                 })
                 .unwrap_or_default();
 
-            info!("[AI 配置] Provider {} 解析完成: {} 个模型", provider_name, models.len());
+            info!(
+                "[AI 配置] Provider {} 解析完成: {} 个模型",
+                provider_name,
+                models.len()
+            );
 
             configured_providers.push(ConfiguredProvider {
                 name: provider_name.clone(),
@@ -750,10 +816,15 @@ pub async fn get_ai_config() -> Result<AIConfigOverview, String> {
         available_models.len()
     );
 
+    let typed: OpenClawConfig = serde_json::from_value(normalized)
+        .map_err(|e| format!("AI 配置结构无效: {}", e))?;
+
     Ok(AIConfigOverview {
         primary_model,
         configured_providers,
         available_models,
+        agents_list: typed.agents.list,
+        bindings: typed.bindings,
     })
 }
 
@@ -1043,6 +1114,29 @@ pub async fn get_ai_providers() -> Result<Vec<crate::models::AIProviderOption>, 
 
 fn parse_account_bindings(bindings: &Value) -> HashMap<(String, String), String> {
     let mut result = HashMap::new();
+
+    if let Ok(entries) = serde_json::from_value::<Vec<BindingEntry>>(bindings.clone()) {
+        for entry in entries {
+            let Some(agent_id) = entry.agent_id else {
+                continue;
+            };
+            let Some(m) = entry.r#match else {
+                continue;
+            };
+            let Some(channel) = m.channel else {
+                continue;
+            };
+            let Some(account_id) = m.account_id else {
+                continue;
+            };
+
+            result.insert((channel, account_id), agent_id);
+        }
+
+        if !result.is_empty() {
+            return result;
+        }
+    }
 
     if let Some(arr) = bindings.as_array() {
         for item in arr {
@@ -1559,7 +1653,8 @@ pub async fn install_feishu_plugin() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_openclaw_config_content;
+    use super::{normalize_and_validate_config, parse_openclaw_config_content};
+    use serde_json::json;
 
     #[test]
     fn parse_pure_json_config() {
@@ -1655,6 +1750,98 @@ mod tests {
                 .pointer("/channels/telegram/accounts/0/token")
                 .and_then(|v| v.as_str()),
             Some("tg-token")
+        );
+    }
+
+    #[test]
+    fn normalize_config_defaults_when_agents_list_and_bindings_missing() {
+        let config = json!({
+            "agents": {
+                "defaults": {
+                    "model": {
+                        "primary": "anthropic/claude-opus-4-5-20251101"
+                    }
+                }
+            }
+        });
+
+        let normalized = normalize_and_validate_config(&config)
+            .expect("仅 defaults 配置应可通过结构化校验");
+
+        assert!(normalized.pointer("/agents/list").is_none());
+        assert!(normalized.get("bindings").is_none());
+    }
+
+    #[test]
+    fn normalize_config_accepts_full_agents_list_and_bindings() {
+        let config = json!({
+            "agents": {
+                "defaults": {
+                    "model": { "primary": "anthropic/claude-opus-4-5-20251101" }
+                },
+                "list": [
+                    {
+                        "id": "main",
+                        "name": "主助手",
+                        "default": true,
+                        "workspace": "/tmp/main"
+                    }
+                ]
+            },
+            "bindings": [
+                {
+                    "agentId": "main",
+                    "match": {
+                        "channel": "telegram",
+                        "accountId": "default"
+                    }
+                }
+            ]
+        });
+
+        let normalized = normalize_and_validate_config(&config)
+            .expect("完整 agents.list + bindings 配置应可通过结构化校验");
+
+        assert_eq!(
+            normalized
+                .pointer("/agents/list/0/id")
+                .and_then(|v| v.as_str()),
+            Some("main")
+        );
+        assert_eq!(
+            normalized
+                .pointer("/bindings/0/match/channel")
+                .and_then(|v| v.as_str()),
+            Some("telegram")
+        );
+    }
+
+    #[test]
+    fn normalize_config_rejects_invalid_agents_list_or_bindings_type() {
+        let invalid_agents_list = json!({
+            "agents": {
+                "defaults": { "model": { "primary": "x/y" } },
+                "list": { "id": "main" }
+            }
+        });
+        let err = normalize_and_validate_config(&invalid_agents_list)
+            .expect_err("agents.list 非数组应返回错误");
+        assert!(
+            err.contains("agents.list 结构无效"),
+            "错误信息应明确指向 agents.list，实际: {}",
+            err
+        );
+
+        let invalid_bindings = json!({
+            "agents": { "defaults": { "model": { "primary": "x/y" } } },
+            "bindings": 123
+        });
+        let err = normalize_and_validate_config(&invalid_bindings)
+            .expect_err("bindings 非数组/对象应返回错误");
+        assert!(
+            err.contains("bindings 结构无效"),
+            "错误信息应明确指向 bindings，实际: {}",
+            err
         );
     }
 }

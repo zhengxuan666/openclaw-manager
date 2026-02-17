@@ -64,10 +64,34 @@ interface ConfiguredProvider {
   models: ConfiguredModel[];
 }
 
+interface AgentEntry {
+  id?: string;
+  name?: string;
+  default?: boolean;
+  workspace?: string;
+  [key: string]: unknown;
+}
+
+interface BindingEntry {
+  agentId?: string;
+  match?: {
+    channel?: string;
+    accountId?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+type BindingsPayload =
+  | BindingEntry[]
+  | Record<string, string | Record<string, string | { agentId?: string }>>;
+
 interface AIConfigOverview {
   primary_model: string | null;
   configured_providers: ConfiguredProvider[];
   available_models: string[];
+  agents_list: AgentEntry[];
+  bindings: BindingsPayload | null;
 }
 
 interface ModelConfig {
@@ -1089,6 +1113,15 @@ export function AIConfig() {
               </h2>
               <p className="text-sm text-gray-500 mt-1">
                 管理 OpenClaw 使用的 AI Provider 和模型
+              </p>
+              <p className="text-xs text-gray-500 mt-2">
+                agents.list：{aiConfig?.agents_list?.length ?? 0} 项 ·
+                bindings：
+                {Array.isArray(aiConfig?.bindings)
+                  ? aiConfig?.bindings.length
+                  : aiConfig?.bindings
+                  ? "对象结构"
+                  : "未配置"}
               </p>
             </div>
             <button

@@ -48,6 +48,20 @@ interface ChannelConfig {
   accounts?: Record<string, Record<string, unknown>>;
 }
 
+type BindingEntry = {
+  agentId?: string;
+  match?: {
+    channel?: string;
+    accountId?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+type BindingsPayload =
+  | BindingEntry[]
+  | Record<string, string | Record<string, string | { agentId?: string }>>;
+
 interface TestResult {
   success: boolean;
   message: string;
@@ -496,7 +510,7 @@ function parseBindings(rawBindings: unknown): Record<string, string> {
 function buildBindingsPayload(
   originalBindings: unknown,
   allBindingsMap: Record<string, string>
-): unknown {
+): BindingsPayload {
   const grouped: Record<string, Record<string, string>> = {};
   Object.entries(allBindingsMap).forEach(([key, agentId]) => {
     const parsed = splitBindingKey(key);
@@ -570,7 +584,7 @@ export function Channels() {
   const [newAccountId, setNewAccountId] = useState("");
 
   const [availableAgents, setAvailableAgents] = useState<string[]>([]);
-  const [bindingsRaw, setBindingsRaw] = useState<unknown>([]);
+  const [bindingsRaw, setBindingsRaw] = useState<BindingsPayload>([]);
   const [allBindingsMap, setAllBindingsMap] = useState<Record<string, string>>(
     {}
   );
@@ -706,11 +720,11 @@ export function Channels() {
       const channelList = await invoke<ChannelConfig[]>("get_channels_config");
 
       const [bindingsResult, agentsResult] = await Promise.allSettled([
-        invoke<unknown>("get_bindings"),
+        invoke<BindingsPayload>("get_bindings"),
         invoke<unknown>("get_agents_list"),
       ]);
 
-      const bindings =
+      const bindings: BindingsPayload =
         bindingsResult.status === "fulfilled" ? bindingsResult.value : [];
       const agentsList =
         agentsResult.status === "fulfilled" ? agentsResult.value : [];
@@ -732,9 +746,14 @@ export function Channels() {
     } catch (e) {
       console.error("获取渠道配置失败:", e);
       setChannels([]);
+      setBindingsRaw([]);
       setAllBindingsMap({});
       setAvailableAgents([]);
-      return { channelList: [], bindingMap: {}, bindings: [] };
+      return {
+        channelList: [],
+        bindingMap: {},
+        bindings: [] as BindingsPayload,
+      };
     }
   };
 

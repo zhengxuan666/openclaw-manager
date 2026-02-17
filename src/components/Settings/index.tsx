@@ -36,7 +36,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   );
 
   const [agentsListText, setAgentsListText] = useState("[]");
-  const [bindingsText, setBindingsText] = useState("{}");
+  const [bindingsText, setBindingsText] = useState("[]");
   const [configLoading, setConfigLoading] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configMessage, setConfigMessage] = useState<string | null>(null);
@@ -108,7 +108,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         ]);
 
         setAgentsListText(JSON.stringify(agentsList ?? [], null, 2));
-        setBindingsText(JSON.stringify(bindings ?? {}, null, 2));
+        setBindingsText(JSON.stringify(bindings ?? [], null, 2));
       } catch (e) {
         console.error("加载 agents.list / bindings 失败:", e);
         setConfigError(String(e));

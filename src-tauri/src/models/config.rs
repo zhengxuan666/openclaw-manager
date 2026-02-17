@@ -19,9 +19,9 @@ pub struct OpenClawConfig {
     /// 插件配置
     #[serde(default)]
     pub plugins: PluginsConfig,
-    /// 路由绑定配置
+    /// 路由绑定配置（支持数组与对象两种常见写法）
     #[serde(default)]
-    pub bindings: Option<serde_json::Value>,
+    pub bindings: Option<BindingsConfig>,
     /// 工具配置
     #[serde(default)]
     pub tools: Option<serde_json::Value>,
@@ -50,7 +50,7 @@ pub struct AgentsConfig {
     pub defaults: AgentDefaults,
     /// Agent 列表（兼容官方 agents.list）
     #[serde(default)]
-    pub list: Vec<serde_json::Value>,
+    pub list: Vec<AgentEntry>,
 }
 
 /// Agent 默认配置
@@ -85,6 +85,92 @@ pub struct AgentModelConfig {
     /// 主模型 (格式: provider/model-id)
     #[serde(default)]
     pub primary: Option<String>,
+}
+
+/// Agent 列表项（强类型 + flatten 兼容未知字段）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentEntry {
+    /// Agent 唯一标识
+    #[serde(default)]
+    pub id: Option<String>,
+    /// 显示名称
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 是否默认 Agent
+    #[serde(default)]
+    pub default: Option<bool>,
+    /// 工作目录
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Agent 模型配置
+    #[serde(default)]
+    pub model: Option<serde_json::Value>,
+    /// Agent 工具配置
+    #[serde(default)]
+    pub tools: Option<serde_json::Value>,
+    /// Agent 沙箱配置
+    #[serde(default)]
+    pub sandbox: Option<serde_json::Value>,
+    /// Agent 额外字段（未知字段不报错）
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// bindings 支持结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BindingsConfig {
+    /// 官方数组结构
+    Entries(Vec<BindingEntry>),
+    /// 对象结构（扁平/分组）
+    Map(serde_json::Map<String, serde_json::Value>),
+}
+
+impl Default for BindingsConfig {
+    fn default() -> Self {
+        Self::Entries(Vec::new())
+    }
+}
+
+impl BindingsConfig {
+    pub fn as_value(&self) -> serde_json::Value {
+        match self {
+            Self::Entries(entries) => serde_json::to_value(entries)
+                .unwrap_or_else(|_| serde_json::Value::Array(vec![])),
+            Self::Map(map) => serde_json::Value::Object(map.clone()),
+        }
+    }
+
+    pub fn into_value(self) -> serde_json::Value {
+        match self {
+            Self::Entries(entries) => {
+                serde_json::to_value(entries).unwrap_or_else(|_| serde_json::Value::Array(vec![]))
+            }
+            Self::Map(map) => serde_json::Value::Object(map),
+        }
+    }
+}
+
+/// 单条 bindings 路由
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BindingEntry {
+    #[serde(rename = "agentId", default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub r#match: Option<BindingMatch>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// bindings 匹配条件
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BindingMatch {
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(rename = "accountId", default)]
+    pub account_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// 模型配置
@@ -298,6 +384,12 @@ pub struct AIConfigOverview {
     pub configured_providers: Vec<ConfiguredProvider>,
     /// 可用模型列表
     pub available_models: Vec<String>,
+    /// agents.list（用于配置总览与最小可视化编辑流）
+    #[serde(default)]
+    pub agents_list: Vec<AgentEntry>,
+    /// bindings（数组/对象均可）
+    #[serde(default)]
+    pub bindings: Option<BindingsConfig>,
 }
 
 // ============ 旧数据结构保持兼容 ============

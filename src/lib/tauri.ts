@@ -101,10 +101,37 @@ export interface ConfiguredModel {
 }
 
 // AI 配置概览
+export interface AgentEntry {
+  id?: string;
+  name?: string;
+  default?: boolean;
+  workspace?: string;
+  model?: unknown;
+  tools?: unknown;
+  sandbox?: unknown;
+  [key: string]: unknown;
+}
+
+export interface BindingEntry {
+  agentId?: string;
+  match?: {
+    channel?: string;
+    accountId?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export type BindingsPayload =
+  | BindingEntry[]
+  | Record<string, string | Record<string, string | { agentId?: string }>>;
+
 export interface AIConfigOverview {
   primary_model: string | null;
   configured_providers: ConfiguredProvider[];
   available_models: string[];
+  agents_list: AgentEntry[];
+  bindings: BindingsPayload | null;
 }
 
 // 模型配置

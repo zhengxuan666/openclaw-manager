@@ -111,7 +111,6 @@
 - `tools`（web search / agentToAgent）
 - `discovery` / `plugins.slots`
 - `gateway.port` / `gateway.bind` / `gateway.trustedProxies`
-- `channels.telegram.accounts`（多账号）
 - `env.shellEnv`（shell 环境变量加载）
 
 ### 已使用且与官方一致的能力
@@ -119,6 +118,7 @@
 - `models.providers` + `agents.defaults.models`
 - `gateway.auth.token`
 - `channels.telegram` 基本结构
+- `channels.<provider>.accounts`（多账号读取/保存/UI 已支持）
 
 ---
 
@@ -158,15 +158,15 @@
 - 至少在 `OpenClawConfig` 中添加结构体字段或 `serde_json::Value`
 - 提供读取与展示，避免“存在但系统不可见”
 
-## 4.3 channels 多账号策略未对齐官方行为
+## 4.3 channels 多账号策略（已完成）
 
-- 官方支持 `channels.<provider>.accounts` 多账号
-- 当前 `get_channels_config` 只读取顶层 `channels.<id>`
-- 多账号配置无法被 UI/命令正确识别
+- 已实现 `channels.<provider>.accounts` 多账号读取与保存
+- `get_channels_config` 已纳入 `accounts` 处理与回传
+- 前端渠道页面已支持多账号展示、编辑与绑定联动
 
-建议：
+说明：
 
-- 读取 `accounts` 并纳入 UI 显示与保存逻辑
+- 该项审计结论已过时，当前版本已对齐官方多账号行为（在现有支持范围内）
 
 ---
 
