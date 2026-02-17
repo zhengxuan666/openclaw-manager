@@ -47,6 +47,48 @@ interface ChannelConfig {
   accounts?: Record<string, Record<string, unknown>>;
 }
 
+interface ConfigValidationIssue {
+  path: string;
+  message: string;
+  variable?: string;
+}
+
+interface ConfigValidationResult {
+  valid: boolean;
+  issues: ConfigValidationIssue[];
+}
+
+interface ConfigDiffItem {
+  kind: "added" | "modified" | "removed";
+  path: string;
+  before?: unknown;
+  after?: unknown;
+  masked: boolean;
+}
+
+interface ConfigDiffSummary {
+  added: number;
+  modified: number;
+  removed: number;
+  changes: ConfigDiffItem[];
+}
+
+interface PreviewConfigResponse {
+  preview_config: unknown;
+  diff_summary: ConfigDiffSummary;
+  validation: ConfigValidationResult;
+}
+
+interface ApplyConfigResponse {
+  backup_path: string;
+  applied_at: string;
+}
+
+interface RollbackConfigResponse {
+  restored_path: string;
+  restored_at: string;
+}
+
 interface VisualAgent {
   id: string;
   name: string;
@@ -62,9 +104,31 @@ interface VisualBinding {
 }
 
 const BINDING_KEY_SEPARATOR = "::";
+const MAX_DIFF_DISPLAY = 200;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function formatValuePreview(value: unknown): string {
+  if (value === undefined) {
+    return "-";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatValidationIssue(issue: ConfigValidationIssue): string {
+  if (issue.variable) {
+    return `${issue.path}：${issue.message}（${issue.variable}）`;
+  }
+  return `${issue.path}：${issue.message}`;
 }
 
 function normalizeAccounts(
@@ -409,7 +473,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
   const [agentsListText, setAgentsListText] = useState("[]");
   const [bindingsText, setBindingsText] = useState("[]");
-  const [configLoading, setConfigLoading] = useState(false);
+  const [, setConfigLoading] = useState(false); // 用于数据加载
   const [configError, setConfigError] = useState<string | null>(null);
   const [configMessage, setConfigMessage] = useState<string | null>(null);
   const [expertMode, setExpertMode] = useState(false);
@@ -418,6 +482,11 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const [visualBindings, setVisualBindings] = useState<VisualBinding[]>([]);
   const [bindingsRaw, setBindingsRaw] = useState<unknown>([]);
   const [channelsConfig, setChannelsConfig] = useState<ChannelConfig[]>([]);
+  const [previewResult, setPreviewResult] =
+    useState<PreviewConfigResponse | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [applyLoading, setApplyLoading] = useState(false);
+  const [rollbackLoading, setRollbackLoading] = useState(false);
 
   const channelOptions = useMemo(() => {
     return Array.from(new Set(channelsConfig.map((channel) => channel.id)));
@@ -448,6 +517,192 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
     setAgentsListText(JSON.stringify(agentsPayload, null, 2));
     setBindingsText(JSON.stringify(bindingsPayload, null, 2));
+  };
+
+  const buildInputConfigPayload = (): {
+    inputConfig: {
+      agents: {
+        list: Record<string, unknown>[];
+      };
+      bindings: BindingsPayload;
+    };
+    normalizedAgents: VisualAgent[];
+    normalizedBindings: VisualBinding[];
+    bindingsPayload: BindingsPayload;
+  } => {
+    if (expertMode) {
+      const parsedAgentsList = JSON.parse(agentsListText);
+      const parsedBindings = JSON.parse(bindingsText) as BindingsPayload;
+
+      if (!Array.isArray(parsedAgentsList)) {
+        throw new Error("agents.list 结构无效：必须为数组");
+      }
+      if (!Array.isArray(parsedBindings) && !isRecord(parsedBindings)) {
+        throw new Error("bindings 结构无效：必须为数组或对象");
+      }
+
+      return {
+        inputConfig: {
+          agents: {
+            list: parsedAgentsList,
+          },
+          bindings: parsedBindings,
+        },
+        normalizedAgents: parseAgentsList(parsedAgentsList),
+        normalizedBindings: bindingsMapToRules(parseBindings(parsedBindings)),
+        bindingsPayload: parsedBindings,
+      };
+    }
+
+    const normalizedAgents = normalizeVisualAgents(visualAgents);
+    const normalizedBindings = normalizeVisualBindings(visualBindings);
+
+    const validationError = validateVisualConfig(
+      normalizedAgents,
+      normalizedBindings
+    );
+    if (validationError) {
+      throw new Error(validationError);
+    }
+
+    const agentsPayload = buildAgentsPayload(normalizedAgents);
+    const bindingsMap = bindingsRulesToMap(normalizedBindings);
+    const bindingsPayload = buildBindingsPayload(bindingsRaw, bindingsMap);
+
+    return {
+      inputConfig: {
+        agents: {
+          list: agentsPayload,
+        },
+        bindings: bindingsPayload,
+      },
+      normalizedAgents,
+      normalizedBindings,
+      bindingsPayload,
+    };
+  };
+
+  const handlePreviewConfig = async () => {
+    setPreviewLoading(true);
+    setConfigError(null);
+    setConfigMessage(null);
+    setPreviewResult(null);
+
+    try {
+      const payload = buildInputConfigPayload();
+      const result = await invoke<PreviewConfigResponse>(
+        "preview_config_change",
+        {
+          inputConfig: payload.inputConfig,
+        }
+      );
+
+      setPreviewResult(result);
+      if (!result.validation.valid) {
+        setConfigError(
+          `预校验失败（${
+            result.validation.issues.length
+          } 项）：${result.validation.issues
+            .slice(0, 3)
+            .map((issue) => formatValidationIssue(issue))
+            .join("；")}`
+        );
+      } else {
+        setConfigMessage(
+          `预览生成成功：新增 ${result.diff_summary.added} 项，修改 ${result.diff_summary.modified} 项，删除 ${result.diff_summary.removed} 项`
+        );
+      }
+    } catch (e) {
+      console.error("生成预览失败:", e);
+      setPreviewResult(null);
+      setConfigError(`生成预览失败: ${String(e)}`);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleApplyConfig = async () => {
+    setApplyLoading(true);
+    setConfigError(null);
+    setConfigMessage(null);
+
+    try {
+      const payload = buildInputConfigPayload();
+
+      const preview = await invoke<PreviewConfigResponse>(
+        "preview_config_change",
+        {
+          inputConfig: payload.inputConfig,
+        }
+      );
+      setPreviewResult(preview);
+
+      if (!preview.validation.valid) {
+        setConfigError(
+          `校验未通过，禁止应用：${preview.validation.issues
+            .map((issue) => formatValidationIssue(issue))
+            .join("；")}`
+        );
+        return;
+      }
+
+      const applyResult = await invoke<ApplyConfigResponse>(
+        "apply_config_change",
+        {
+          inputConfig: payload.inputConfig,
+        }
+      );
+
+      setVisualAgents(payload.normalizedAgents);
+      setVisualBindings(payload.normalizedBindings);
+      setBindingsRaw(payload.bindingsPayload);
+      setAgentsListText(
+        JSON.stringify(buildAgentsPayload(payload.normalizedAgents), null, 2)
+      );
+      setBindingsText(JSON.stringify(payload.bindingsPayload, null, 2));
+      setConfigMessage(
+        `配置已应用（备份：${applyResult.backup_path}，时间：${applyResult.applied_at}）`
+      );
+    } catch (e) {
+      console.error("应用配置失败:", e);
+      setConfigError(`应用配置失败: ${String(e)}`);
+    } finally {
+      setApplyLoading(false);
+    }
+  };
+
+  const handleRollbackLatest = async () => {
+    setRollbackLoading(true);
+    setConfigError(null);
+    setConfigMessage(null);
+
+    try {
+      const result = await invoke<RollbackConfigResponse>("rollback_config", {
+        backupPath: null,
+      });
+
+      const [agentsResult, bindingsResult, channelsResult] = await Promise.all([
+        invoke<unknown>("get_agents_list"),
+        invoke<unknown>("get_bindings"),
+        invoke<ChannelConfig[]>("get_channels_config"),
+      ]);
+
+      setVisualAgents(parseAgentsList(agentsResult));
+      setVisualBindings(bindingsMapToRules(parseBindings(bindingsResult)));
+      setBindingsRaw(bindingsResult);
+      setAgentsListText(JSON.stringify(agentsResult ?? [], null, 2));
+      setBindingsText(JSON.stringify(bindingsResult ?? [], null, 2));
+      setChannelsConfig(channelsResult ?? []);
+      setPreviewResult(null);
+      setConfigMessage(
+        `已回滚到备份：${result.restored_path}（${result.restored_at}）`
+      );
+    } catch (e) {
+      console.error("回滚失败:", e);
+      setConfigError(`回滚失败: ${String(e)}`);
+    } finally {
+      setRollbackLoading(false);
+    }
   };
 
   const handleSave = async () => {
@@ -746,68 +1001,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   };
 
   const saveAgentAndBindingConfig = async () => {
-    setConfigLoading(true);
-    setConfigError(null);
-    setConfigMessage(null);
-
-    try {
-      if (expertMode) {
-        const parsedAgentsList = JSON.parse(agentsListText);
-        const parsedBindings = JSON.parse(bindingsText);
-
-        if (!Array.isArray(parsedAgentsList)) {
-          throw new Error("agents.list 结构无效：必须为数组");
-        }
-
-        if (!Array.isArray(parsedBindings) && !isRecord(parsedBindings)) {
-          throw new Error("bindings 结构无效：必须为数组或对象");
-        }
-
-        await invoke<string>("save_agents_list", {
-          agentsList: parsedAgentsList,
-        });
-        await invoke<string>("save_bindings", { bindings: parsedBindings });
-
-        setVisualAgents(parseAgentsList(parsedAgentsList));
-        setVisualBindings(bindingsMapToRules(parseBindings(parsedBindings)));
-        setBindingsRaw(parsedBindings);
-        setAgentsListText(JSON.stringify(parsedAgentsList, null, 2));
-        setBindingsText(JSON.stringify(parsedBindings, null, 2));
-      } else {
-        const normalizedAgents = normalizeVisualAgents(visualAgents);
-        const normalizedBindings = normalizeVisualBindings(visualBindings);
-
-        const validationError = validateVisualConfig(
-          normalizedAgents,
-          normalizedBindings
-        );
-        if (validationError) {
-          throw new Error(validationError);
-        }
-
-        const agentsPayload = buildAgentsPayload(normalizedAgents);
-        const bindingMap = bindingsRulesToMap(normalizedBindings);
-        const bindingsPayload = buildBindingsPayload(bindingsRaw, bindingMap);
-
-        await invoke<string>("save_agents_list", {
-          agentsList: agentsPayload,
-        });
-        await invoke<string>("save_bindings", { bindings: bindingsPayload });
-
-        setVisualAgents(normalizedAgents);
-        setVisualBindings(normalizedBindings);
-        setBindingsRaw(bindingsPayload);
-        setAgentsListText(JSON.stringify(agentsPayload, null, 2));
-        setBindingsText(JSON.stringify(bindingsPayload, null, 2));
-      }
-
-      setConfigMessage("agents.list 与 bindings 已保存");
-    } catch (e) {
-      console.error("保存 agents.list / bindings 失败:", e);
-      setConfigError(String(e));
-    } finally {
-      setConfigLoading(false);
-    }
+    await handleApplyConfig();
   };
 
   return (
@@ -1303,19 +1497,132 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
               </div>
             )}
 
-            <div className="flex justify-end">
-              <button
-                onClick={saveAgentAndBindingConfig}
-                disabled={configLoading}
-                className="btn-secondary flex items-center gap-2"
-              >
-                {configLoading ? (
-                  <Loader2 size={16} className="animate-spin" />
-                ) : (
-                  <Save size={16} />
-                )}
-                保存 agents.list / bindings
-              </button>
+            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-3">
+              <div className="text-xs text-gray-400">
+                新流程：先“生成预览”→查看差异/校验→“应用配置”（自动备份）→可“回滚最近备份”。
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  onClick={handlePreviewConfig}
+                  disabled={previewLoading || applyLoading || rollbackLoading}
+                  className="btn-secondary flex items-center justify-center gap-2"
+                >
+                  {previewLoading ? (
+                    <Loader2 size={16} className="animate-spin" />
+                  ) : (
+                    <FileCode size={16} />
+                  )}
+                  生成预览
+                </button>
+
+                <button
+                  type="button"
+                  disabled={!previewResult}
+                  onClick={() => {
+                    if (!previewResult) return;
+                    const summary = previewResult.diff_summary;
+                    const sample = summary.changes
+                      .slice(0, 10)
+                      .map(
+                        (item) =>
+                          `[${item.kind}] ${item.path} | ${formatValuePreview(
+                            item.before
+                          )} -> ${formatValuePreview(item.after)}${
+                            item.masked ? " (masked)" : ""
+                          }`
+                      )
+                      .join("\n");
+                    alert(
+                      `变更摘要：新增 ${summary.added}，修改 ${
+                        summary.modified
+                      }，删除 ${summary.removed}\n\n${sample || "无差异"}`
+                    );
+                  }}
+                  className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  <Link2 size={16} />
+                  查看变更摘要
+                </button>
+
+                <button
+                  onClick={saveAgentAndBindingConfig}
+                  disabled={
+                    applyLoading ||
+                    previewLoading ||
+                    rollbackLoading ||
+                    (previewResult !== null && !previewResult.validation.valid)
+                  }
+                  className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {applyLoading ? (
+                    <Loader2 size={16} className="animate-spin" />
+                  ) : (
+                    <Save size={16} />
+                  )}
+                  应用配置
+                </button>
+
+                <button
+                  onClick={handleRollbackLatest}
+                  disabled={rollbackLoading || previewLoading || applyLoading}
+                  className="btn-secondary flex items-center justify-center gap-2"
+                >
+                  {rollbackLoading ? (
+                    <Loader2 size={16} className="animate-spin" />
+                  ) : (
+                    <Trash2 size={16} />
+                  )}
+                  回滚最近备份
+                </button>
+              </div>
+
+              {previewResult && (
+                <div className="text-xs text-gray-400 space-y-2">
+                  <div>
+                    预览差异：新增 {previewResult.diff_summary.added}，修改{" "}
+                    {previewResult.diff_summary.modified}，删除{" "}
+                    {previewResult.diff_summary.removed}
+                  </div>
+                  <div>
+                    预校验：
+                    {previewResult.validation.valid
+                      ? "通过"
+                      : `失败（${previewResult.validation.issues.length} 项）`}
+                  </div>
+                  {!previewResult.validation.valid && (
+                    <ul className="list-disc list-inside text-red-300 max-h-40 overflow-auto space-y-1">
+                      {previewResult.validation.issues.map((issue, idx) => (
+                        <li key={`${issue.path}-${idx}`}>
+                          {formatValidationIssue(issue)}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {previewResult.diff_summary.changes.length > 0 && (
+                    <div className="max-h-44 overflow-auto rounded-lg border border-dark-500 p-2 bg-dark-700/60 space-y-1">
+                      {previewResult.diff_summary.changes
+                        .slice(0, MAX_DIFF_DISPLAY)
+                        .map((item, idx) => (
+                          <div key={`${item.path}-${idx}`}>
+                            <span className="text-cyan-300">[{item.kind}]</span>{" "}
+                            <span className="text-gray-300">{item.path}</span>
+                            <span className="text-gray-500"> | </span>
+                            <span className="text-gray-400">
+                              {formatValuePreview(item.before)} →{" "}
+                              {formatValuePreview(item.after)}
+                            </span>
+                            {item.masked && (
+                              <span className="text-amber-300">
+                                （敏感字段已掩码）
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
