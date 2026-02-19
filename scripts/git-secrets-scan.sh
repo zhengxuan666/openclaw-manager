@@ -12,8 +12,10 @@ if [[ -z "${STAGED_FILES}" ]]; then
   exit 0
 fi
 
-# Heuristic secret patterns (intentionally conservative)
-PATTERN="(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|([Aa][Pp][Ii][_ -]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])[[:space:]]*[:=][[:space:]]*[A-Za-z0-9_\-\/=+]{12,})"
+# Heuristic secret patterns (known high-risk prefixes first, then conservative literal assignments)
+HIGH_RISK_PATTERN="AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"
+GENERIC_LITERAL_ASSIGN_PATTERN="([Aa][Pp][Ii][_ -]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])[[:space:]]*[:=][[:space:]]*(\"[A-Za-z0-9_\-\/=+]{16,}\"|'[A-Za-z0-9_\-\/=+]{16,}')"
+PATTERN="(${HIGH_RISK_PATTERN}|${GENERIC_LITERAL_ASSIGN_PATTERN})"
 
 HIT=0
 while IFS= read -r f; do
