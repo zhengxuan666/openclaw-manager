@@ -837,6 +837,25 @@ async fn dispatch_command(command: &str, args: &Value) -> Result<Value, String> 
                 .ok_or_else(|| "缺少参数: config".to_string())?;
             Ok(json!(config::save_config(cfg).await?))
         }
+        "preview_config_change" => {
+            let input_config = read_arg(args, &["inputConfig", "input_config"])
+                .cloned()
+                .ok_or_else(|| "缺少参数: inputConfig".to_string())?;
+            Ok(json!(config::preview_config_change(input_config).await?))
+        }
+        "apply_config_change" => {
+            let input_config = read_arg(args, &["inputConfig", "input_config"])
+                .cloned()
+                .ok_or_else(|| "缺少参数: inputConfig".to_string())?;
+            Ok(json!(config::apply_config_change(input_config).await?))
+        }
+        "list_config_backups" => Ok(json!(config::list_config_backups().await?)),
+        "rollback_config" => {
+            let backup_path = read_arg(args, &["backupPath", "backup_path"])
+                .and_then(|v| v.as_str())
+                .map(|value| value.to_string());
+            Ok(json!(config::rollback_config(backup_path).await?))
+        }
         "get_agents_list" => Ok(config::get_agents_list().await?),
         "save_agents_list" => {
             let agents_list = read_arg(args, &["agentsList", "agents_list", "agentsListJson", "agents_list_json"])

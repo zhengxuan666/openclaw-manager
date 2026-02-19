@@ -735,8 +735,6 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
             .map((issue) => formatValidationIssue(issue))
             .join("；")}`
         );
-      } else {
-        // 预览成功仅更新面板，不弹“设置成功”
       }
     } catch (e) {
       console.error("生成预览失败:", e);

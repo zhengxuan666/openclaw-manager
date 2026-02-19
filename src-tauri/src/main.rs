@@ -34,10 +34,14 @@ fn main() {
             process::check_openclaw_installed,
             process::get_openclaw_version,
             process::check_port_in_use,
-            // 配置管理
             config::get_config,
             config::save_config,
+            config::preview_config_change,
+            config::apply_config_change,
+            config::list_config_backups,
+            config::rollback_config,
             config::get_agents_list,
+
             config::save_agents_list,
             config::get_bindings,
             config::save_bindings,
