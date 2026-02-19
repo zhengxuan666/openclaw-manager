@@ -89,6 +89,12 @@ interface RollbackConfigResponse {
   restored_at: string;
 }
 
+interface ConfigBackupItem {
+  path: string;
+  createdAt: string;
+  size: number;
+}
+
 interface VisualAgent {
   id: string;
   name: string;
@@ -419,6 +425,42 @@ function normalizeVisualBindings(bindings: VisualBinding[]): VisualBinding[] {
   }));
 }
 
+function toStableComparable(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => toStableComparable(item));
+  }
+
+  if (isRecord(value)) {
+    return Object.keys(value)
+      .sort()
+      .reduce<Record<string, unknown>>((acc, key) => {
+        acc[key] = toStableComparable(value[key]);
+        return acc;
+      }, {});
+  }
+
+  return value;
+}
+
+function buildManagedConfigSignature(
+  agents: VisualAgent[],
+  bindings: VisualBinding[]
+): string {
+  const agentsPayload = buildAgentsPayload(normalizeVisualAgents(agents));
+  const bindingsMap = bindingsRulesToMap(normalizeVisualBindings(bindings));
+
+  return JSON.stringify(
+    toStableComparable({
+      agents: agentsPayload,
+      bindings: bindingsMap,
+    })
+  );
+}
+
+function hasDiffSummaryChanges(summary: ConfigDiffSummary): boolean {
+  return summary.added + summary.modified + summary.removed > 0;
+}
+
 function validateVisualConfig(
   agents: VisualAgent[],
   bindings: VisualBinding[]
@@ -464,7 +506,6 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     userName: "主人",
     timezone: "Asia/Shanghai",
   });
-  const [saving, setSaving] = useState(false);
   const [showUninstallConfirm, setShowUninstallConfirm] = useState(false);
   const [uninstalling, setUninstalling] = useState(false);
   const [uninstallResult, setUninstallResult] = useState<InstallResult | null>(
@@ -475,7 +516,12 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const [bindingsText, setBindingsText] = useState("[]");
   const [, setConfigLoading] = useState(false); // 用于数据加载
   const [configError, setConfigError] = useState<string | null>(null);
+  const [showConfigErrorModal, setShowConfigErrorModal] = useState(false);
   const [configMessage, setConfigMessage] = useState<string | null>(null);
+  const [showConfigSuccessModal, setShowConfigSuccessModal] = useState(false);
+  const [configSuccessMessage, setConfigSuccessMessage] = useState<
+    string | null
+  >(null);
   const [expertMode, setExpertMode] = useState(false);
 
   const [visualAgents, setVisualAgents] = useState<VisualAgent[]>([]);
@@ -487,6 +533,64 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [applyLoading, setApplyLoading] = useState(false);
   const [rollbackLoading, setRollbackLoading] = useState(false);
+  const [showRollbackDialog, setShowRollbackDialog] = useState(false);
+  const [backupOptions, setBackupOptions] = useState<ConfigBackupItem[]>([]);
+  const [selectedBackupPath, setSelectedBackupPath] = useState("");
+  const [baselineManagedSignature, setBaselineManagedSignature] = useState("");
+
+  const managedConfigSignature = useMemo(() => {
+    if (!expertMode) {
+      return buildManagedConfigSignature(visualAgents, visualBindings);
+    }
+
+    try {
+      const parsedAgentsList = JSON.parse(agentsListText);
+      const parsedBindings = JSON.parse(bindingsText);
+
+      if (!Array.isArray(parsedAgentsList)) {
+        return "__invalid_agents_list__";
+      }
+
+      if (!Array.isArray(parsedBindings) && !isRecord(parsedBindings)) {
+        return "__invalid_bindings__";
+      }
+
+      return buildManagedConfigSignature(
+        parseAgentsList(parsedAgentsList),
+        bindingsMapToRules(parseBindings(parsedBindings))
+      );
+    } catch {
+      return "__invalid_json__";
+    }
+  }, [expertMode, visualAgents, visualBindings, agentsListText, bindingsText]);
+
+  const hasPendingChanges = useMemo(() => {
+    if (!baselineManagedSignature) {
+      return false;
+    }
+    return managedConfigSignature !== baselineManagedSignature;
+  }, [managedConfigSignature, baselineManagedSignature]);
+
+  const previewHasChanges = useMemo(() => {
+    if (!previewResult) {
+      return true;
+    }
+    return hasDiffSummaryChanges(previewResult.diff_summary);
+  }, [previewResult]);
+
+  const canApplyConfig =
+    hasPendingChanges &&
+    previewHasChanges &&
+    !applyLoading &&
+    !previewLoading &&
+    !rollbackLoading &&
+    (previewResult === null || previewResult.validation.valid);
+
+  const applyDisabledReason = !hasPendingChanges
+    ? "无配置变更"
+    : !previewHasChanges
+    ? "无配置变更"
+    : null;
 
   const channelOptions = useMemo(() => {
     return Array.from(new Set(channelsConfig.map((channel) => channel.id)));
@@ -517,6 +621,25 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
     setAgentsListText(JSON.stringify(agentsPayload, null, 2));
     setBindingsText(JSON.stringify(bindingsPayload, null, 2));
+  };
+
+  const buildGlobalInputConfigPayload = async (
+    agentsList: Record<string, unknown>[],
+    bindingsPayload: BindingsPayload
+  ) => {
+    const fullConfig = await invoke<Record<string, unknown>>("get_config");
+    const merged = {
+      ...fullConfig,
+      agents: {
+        ...(typeof fullConfig?.agents === "object" &&
+        fullConfig?.agents !== null
+          ? (fullConfig.agents as Record<string, unknown>)
+          : {}),
+        list: agentsList,
+      },
+      bindings: bindingsPayload as unknown as Record<string, unknown>,
+    };
+    return merged as Record<string, unknown>;
   };
 
   const buildInputConfigPayload = (): {
@@ -590,10 +713,15 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
     try {
       const payload = buildInputConfigPayload();
+      const globalInputConfig = await buildGlobalInputConfigPayload(
+        buildAgentsPayload(payload.normalizedAgents),
+        payload.bindingsPayload
+      );
+
       const result = await invoke<PreviewConfigResponse>(
         "preview_config_change",
         {
-          inputConfig: payload.inputConfig,
+          inputConfig: globalInputConfig,
         }
       );
 
@@ -608,9 +736,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
             .join("；")}`
         );
       } else {
-        setConfigMessage(
-          `预览生成成功：新增 ${result.diff_summary.added} 项，修改 ${result.diff_summary.modified} 项，删除 ${result.diff_summary.removed} 项`
-        );
+        // 预览成功仅更新面板，不弹“设置成功”
       }
     } catch (e) {
       console.error("生成预览失败:", e);
@@ -622,6 +748,11 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   };
 
   const handleApplyConfig = async () => {
+    if (!hasPendingChanges) {
+      setConfigMessage("无配置变更，无需应用");
+      return;
+    }
+
     setApplyLoading(true);
     setConfigError(null);
     setConfigMessage(null);
@@ -629,10 +760,15 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     try {
       const payload = buildInputConfigPayload();
 
+      const globalInputConfig = await buildGlobalInputConfigPayload(
+        buildAgentsPayload(payload.normalizedAgents),
+        payload.bindingsPayload
+      );
+
       const preview = await invoke<PreviewConfigResponse>(
         "preview_config_change",
         {
-          inputConfig: payload.inputConfig,
+          inputConfig: globalInputConfig,
         }
       );
       setPreviewResult(preview);
@@ -646,10 +782,15 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         return;
       }
 
+      if (!hasDiffSummaryChanges(preview.diff_summary)) {
+        setConfigMessage("无配置变更，无需应用");
+        return;
+      }
+
       const applyResult = await invoke<ApplyConfigResponse>(
         "apply_config_change",
         {
-          inputConfig: payload.inputConfig,
+          inputConfig: globalInputConfig,
         }
       );
 
@@ -660,6 +801,12 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         JSON.stringify(buildAgentsPayload(payload.normalizedAgents), null, 2)
       );
       setBindingsText(JSON.stringify(payload.bindingsPayload, null, 2));
+      setBaselineManagedSignature(
+        buildManagedConfigSignature(
+          payload.normalizedAgents,
+          payload.normalizedBindings
+        )
+      );
       setConfigMessage(
         `配置已应用（备份：${applyResult.backup_path}，时间：${applyResult.applied_at}）`
       );
@@ -671,14 +818,41 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     }
   };
 
-  const handleRollbackLatest = async () => {
+  const handleOpenRollbackDialog = async () => {
+    setRollbackLoading(true);
+    setConfigError(null);
+    setConfigMessage(null);
+
+    try {
+      const backups = await invoke<ConfigBackupItem[]>("list_config_backups");
+      if (!Array.isArray(backups) || backups.length === 0) {
+        throw new Error("未找到可用备份，请先应用一次配置生成备份");
+      }
+
+      setBackupOptions(backups);
+      setSelectedBackupPath(backups[0]?.path ?? "");
+      setShowRollbackDialog(true);
+    } catch (e) {
+      console.error("获取备份列表失败:", e);
+      setConfigError(`获取备份列表失败: ${String(e)}`);
+    } finally {
+      setRollbackLoading(false);
+    }
+  };
+
+  const handleConfirmRollback = async () => {
+    if (!selectedBackupPath) {
+      setConfigError("请先选择要回滚的备份版本");
+      return;
+    }
+
     setRollbackLoading(true);
     setConfigError(null);
     setConfigMessage(null);
 
     try {
       const result = await invoke<RollbackConfigResponse>("rollback_config", {
-        backupPath: null,
+        backupPath: selectedBackupPath,
       });
 
       const [agentsResult, bindingsResult, channelsResult] = await Promise.all([
@@ -687,13 +861,22 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         invoke<ChannelConfig[]>("get_channels_config"),
       ]);
 
-      setVisualAgents(parseAgentsList(agentsResult));
-      setVisualBindings(bindingsMapToRules(parseBindings(bindingsResult)));
+      const nextVisualAgents = parseAgentsList(agentsResult);
+      const nextVisualBindings = bindingsMapToRules(
+        parseBindings(bindingsResult)
+      );
+
+      setVisualAgents(nextVisualAgents);
+      setVisualBindings(nextVisualBindings);
       setBindingsRaw(bindingsResult);
       setAgentsListText(JSON.stringify(agentsResult ?? [], null, 2));
       setBindingsText(JSON.stringify(bindingsResult ?? [], null, 2));
       setChannelsConfig(channelsResult ?? []);
       setPreviewResult(null);
+      setBaselineManagedSignature(
+        buildManagedConfigSignature(nextVisualAgents, nextVisualBindings)
+      );
+      setShowRollbackDialog(false);
       setConfigMessage(
         `已回滚到备份：${result.restored_path}（${result.restored_at}）`
       );
@@ -702,19 +885,6 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setConfigError(`回滚失败: ${String(e)}`);
     } finally {
       setRollbackLoading(false);
-    }
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      // TODO: 保存身份配置
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      alert("设置已保存！");
-    } catch (e) {
-      console.error("保存失败:", e);
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -757,6 +927,19 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setUninstalling(false);
     }
   };
+
+  useEffect(() => {
+    if (configError) {
+      setShowConfigErrorModal(true);
+    }
+  }, [configError]);
+
+  useEffect(() => {
+    if (configMessage && !configError) {
+      setConfigSuccessMessage(configMessage);
+      setShowConfigSuccessModal(true);
+    }
+  }, [configMessage, configError]);
 
   useEffect(() => {
     const loadAgentAndBindingConfig = async () => {
@@ -803,17 +986,22 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           warnings.push("获取渠道配置失败，已降级为空");
         }
 
-        const parsedAgents = parseAgentsList(agentsList);
         const parsedBindings = bindingsMapToRules(
           parseBindings(loadedBindings)
         );
 
         setAgentsListText(JSON.stringify(agentsList ?? [], null, 2));
         setBindingsText(JSON.stringify(loadedBindings ?? [], null, 2));
-        setVisualAgents(parsedAgents);
-        setVisualBindings(parsedBindings);
+        const nextVisualAgents = parseAgentsList(agentsList);
+        const nextVisualBindings = parsedBindings;
+
+        setVisualAgents(nextVisualAgents);
+        setVisualBindings(nextVisualBindings);
         setBindingsRaw(loadedBindings ?? []);
         setChannelsConfig(loadedChannels ?? []);
+        setBaselineManagedSignature(
+          buildManagedConfigSignature(nextVisualAgents, nextVisualBindings)
+        );
 
         if (warnings.length > 0) {
           setConfigError(warnings.join("；"));
@@ -915,7 +1103,6 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     ) {
       const message = `无法删除 Agent ${targetId}：仍被 Binding 路由规则引用`;
       setConfigError(message);
-      alert(message);
       return;
     }
 
@@ -1155,17 +1342,6 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
               </p>
             </div>
           </div>
-
-          {configError && (
-            <div className="mb-4 p-3 rounded-lg bg-red-900/30 border border-red-800 text-sm text-red-300">
-              {configError}
-            </div>
-          )}
-          {configMessage && !configError && (
-            <div className="mb-4 p-3 rounded-lg bg-green-900/30 border border-green-800 text-sm text-green-300">
-              {configMessage}
-            </div>
-          )}
 
           <div className="space-y-4">
             <div className="p-4 rounded-lg bg-dark-600 border border-dark-500 flex items-center justify-between gap-4">
@@ -1499,7 +1675,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
             <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-3">
               <div className="text-xs text-gray-400">
-                新流程：先“生成预览”→查看差异/校验→“应用配置”（自动备份）→可“回滚最近备份”。
+                新流程：先“生成预览”→查看差异/校验→“应用配置”（自动备份）→可“选择备份并回滚”。
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -1546,25 +1722,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                 </button>
 
                 <button
-                  onClick={saveAgentAndBindingConfig}
-                  disabled={
-                    applyLoading ||
-                    previewLoading ||
-                    rollbackLoading ||
-                    (previewResult !== null && !previewResult.validation.valid)
-                  }
-                  className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {applyLoading ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <Save size={16} />
-                  )}
-                  应用配置
-                </button>
-
-                <button
-                  onClick={handleRollbackLatest}
+                  onClick={handleOpenRollbackDialog}
                   disabled={rollbackLoading || previewLoading || applyLoading}
                   className="btn-secondary flex items-center justify-center gap-2"
                 >
@@ -1573,8 +1731,27 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                   ) : (
                     <Trash2 size={16} />
                   )}
-                  回滚最近备份
+                  选择备份并回滚
                 </button>
+
+                <button
+                  onClick={saveAgentAndBindingConfig}
+                  disabled={!canApplyConfig}
+                  title={applyDisabledReason ?? undefined}
+                  className="btn-primary flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {applyLoading ? (
+                    <Loader2 size={16} className="animate-spin" />
+                  ) : (
+                    <Save size={16} />
+                  )}
+                  应用配置
+                </button>
+                {applyDisabledReason && (
+                  <div className="text-xs text-gray-500 sm:col-span-2 text-center">
+                    {applyDisabledReason}
+                  </div>
+                )}
               </div>
 
               {previewResult && (
@@ -1591,13 +1768,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                       : `失败（${previewResult.validation.issues.length} 项）`}
                   </div>
                   {!previewResult.validation.valid && (
-                    <ul className="list-disc list-inside text-red-300 max-h-40 overflow-auto space-y-1">
-                      {previewResult.validation.issues.map((issue, idx) => (
-                        <li key={`${issue.path}-${idx}`}>
-                          {formatValidationIssue(issue)}
-                        </li>
-                      ))}
-                    </ul>
+                    <div className="text-amber-300">
+                      校验失败详情已通过弹框提示，请先修复后再应用。
+                    </div>
                   )}
                   {previewResult.diff_summary.changes.length > 0 && (
                     <div className="max-h-44 overflow-auto rounded-lg border border-dark-500 p-2 bg-dark-700/60 space-y-1">
@@ -1656,6 +1829,155 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
             </button>
           </div>
         </div>
+
+        {/* 成功提示弹框 */}
+        {showConfigSuccessModal && configSuccessMessage && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="bg-dark-700 rounded-2xl p-6 border border-green-800 max-w-md w-full mx-4 shadow-2xl">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-xl bg-green-500/20 flex items-center justify-center">
+                  <Save size={20} className="text-green-300" />
+                </div>
+                <h3 className="text-lg font-semibold text-white">设置成功</h3>
+              </div>
+
+              <p className="text-sm text-green-300 whitespace-pre-wrap break-words">
+                {configSuccessMessage}
+              </p>
+
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => {
+                    setShowConfigSuccessModal(false);
+                    setConfigSuccessMessage(null);
+                    setConfigMessage(null);
+                  }}
+                  className="px-4 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg transition-colors"
+                >
+                  确定
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 回滚确认对话框 */}
+        {showRollbackDialog && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500 max-w-xl w-full mx-4 shadow-2xl">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
+                    <AlertTriangle size={20} className="text-amber-300" />
+                  </div>
+                  <h3 className="text-lg font-semibold text-white">
+                    选择回滚版本
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setShowRollbackDialog(false)}
+                  className="text-gray-400 hover:text-white transition-colors"
+                  disabled={rollbackLoading}
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <p className="text-sm text-gray-300 mb-4">
+                请选择要还原的备份版本，然后点击确认执行回滚。
+              </p>
+
+              <div className="max-h-72 overflow-auto space-y-2 mb-5">
+                {backupOptions.map((item) => {
+                  const selected = selectedBackupPath === item.path;
+                  return (
+                    <label
+                      key={item.path}
+                      className={`block rounded-lg border p-3 cursor-pointer transition-colors ${
+                        selected
+                          ? "border-claw-500 bg-claw-500/10"
+                          : "border-dark-500 bg-dark-600 hover:bg-dark-500"
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <input
+                          type="radio"
+                          name="rollback-backup"
+                          checked={selected}
+                          onChange={() => setSelectedBackupPath(item.path)}
+                          className="mt-1"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm text-white">{item.createdAt}</p>
+                          <p className="text-xs text-gray-400 break-all mt-1">
+                            {item.path}
+                          </p>
+                          <p className="text-xs text-gray-500 mt-1">
+                            {(item.size / 1024).toFixed(1)} KB
+                          </p>
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowRollbackDialog(false)}
+                  className="flex-1 px-4 py-2.5 bg-dark-600 hover:bg-dark-500 text-white rounded-lg transition-colors"
+                  disabled={rollbackLoading}
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleConfirmRollback}
+                  disabled={rollbackLoading || !selectedBackupPath}
+                  className="flex-1 px-4 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {rollbackLoading ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      回滚中...
+                    </>
+                  ) : (
+                    "确认回滚"
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 错误提示弹框 */}
+        {showConfigErrorModal && configError && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="bg-dark-700 rounded-2xl p-6 border border-red-800 max-w-md w-full mx-4 shadow-2xl">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center">
+                  <AlertTriangle size={20} className="text-red-400" />
+                </div>
+                <h3 className="text-lg font-semibold text-white">操作失败</h3>
+              </div>
+
+              <p className="text-sm text-red-300 whitespace-pre-wrap break-words">
+                {configError}
+              </p>
+
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => {
+                    setShowConfigErrorModal(false);
+                    setConfigError(null);
+                  }}
+                  className="px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors"
+                >
+                  确定
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* 卸载确认对话框 */}
         {showUninstallConfirm && (
@@ -1757,22 +2079,6 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
             </div>
           </div>
         )}
-
-        {/* 保存按钮 */}
-        <div className="flex justify-end">
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="btn-primary flex items-center gap-2"
-          >
-            {saving ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Save size={16} />
-            )}
-            保存设置
-          </button>
-        </div>
       </div>
     </div>
   );

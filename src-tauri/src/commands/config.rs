@@ -5,9 +5,12 @@ use crate::models::{
 };
 use crate::utils::{file, platform, shell};
 use log::{debug, error, info, warn};
-use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
 use tauri::command;
 
 /// 解析 openclaw 配置（JSON / JSON5）
@@ -267,9 +270,439 @@ fn merge_gateway_critical_fields(target: &mut Value, source: &Value) {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigValidationIssue {
+    pub path: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConfigValidationResult {
+    pub valid: bool,
+    #[serde(default)]
+    pub issues: Vec<ConfigValidationIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigDiffItem {
+    pub kind: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<Value>,
+    pub masked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConfigDiffSummary {
+    pub added: usize,
+    pub modified: usize,
+    pub removed: usize,
+    #[serde(default)]
+    pub changes: Vec<ConfigDiffItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewConfigResponse {
+    pub preview_config: Value,
+    pub diff_summary: ConfigDiffSummary,
+    pub validation: ConfigValidationResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyConfigResponse {
+    pub backup_path: String,
+    pub applied_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackConfigResponse {
+    pub restored_path: String,
+    pub restored_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigBackupItem {
+    pub path: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    pub size: u64,
+}
+
+fn format_timestamp_from_system_time(system_time: std::time::SystemTime) -> String {
+    match system_time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => match chrono::DateTime::<chrono::Utc>::from_timestamp(duration.as_secs() as i64, 0) {
+            Some(dt) => dt.to_rfc3339(),
+            None => duration.as_secs().to_string(),
+        },
+        Err(_) => chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+fn format_now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn timestamp_for_backup_name() -> String {
+    chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f").to_string()
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+
+    let lower = key.to_ascii_lowercase();
+    [
+        "apikey",
+        "api_key",
+        "token",
+        "secret",
+        "password",
+        "privatekey",
+        "private_key",
+        "authorization",
+        "bearer",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword))
+}
+
+fn redact_sensitive_value(value: &Value) -> Value {
+    match value {
+        Value::Object(obj) => {
+            let mut next = serde_json::Map::new();
+            for (key, nested) in obj {
+                if is_sensitive_key(key) {
+                    next.insert(key.clone(), Value::String("***".to_string()));
+                } else {
+                    next.insert(key.clone(), redact_sensitive_value(nested));
+                }
+            }
+            Value::Object(next)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(redact_sensitive_value).collect()),
+        _ => value.clone(),
+    }
+}
+
+const OPTIONAL_NULL_EQ_PATH_PATTERNS: &[&str] = &[
+    "/bindings",
+    "/tools",
+    "/messages",
+    "/commands",
+    "/web",
+    "/discovery",
+    "/agents/list/*/name",
+    "/agents/list/*/workspace",
+    "/agents/list/*/default",
+    "/agents/list/*/model",
+    "/agents/list/*/tools",
+    "/agents/list/*/sandbox",
+    "/bindings/*/agentId",
+    "/bindings/*/match",
+    "/bindings/*/match/channel",
+    "/bindings/*/match/accountId",
+];
+
+const OPTIONAL_FALSE_MISSING_PATH_PATTERNS: &[&str] = &["/agents/list/*/default"];
+
+const OPTIONAL_EMPTY_MISSING_PATH_PATTERNS: &[&str] = &[
+    "/bindings",
+    "/tools",
+    "/messages",
+    "/commands",
+    "/web",
+    "/discovery",
+    "/agents/list/*/model",
+    "/agents/list/*/tools",
+    "/agents/list/*/sandbox",
+    "/bindings/*/match",
+];
+
+fn normalize_diff_path(path: &str) -> String {
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn json_pointer_segments(path: &str) -> Vec<String> {
+    if path.is_empty() || path == "/" {
+        return Vec::new();
+    }
+
+    path.trim_start_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+        .collect()
+}
+
+fn json_pointer_matches_pattern(path: &str, pattern: &str) -> bool {
+    let path_segments = json_pointer_segments(path);
+    let pattern_segments = json_pointer_segments(pattern);
+
+    if path_segments.len() != pattern_segments.len() {
+        return false;
+    }
+
+    path_segments
+        .iter()
+        .zip(pattern_segments.iter())
+        .all(|(path_segment, pattern_segment)| {
+            pattern_segment == "*" || path_segment == pattern_segment
+        })
+}
+
+fn matches_any_json_pointer_pattern(path: &str, patterns: &[&str]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| json_pointer_matches_pattern(path, pattern))
+}
+
+fn is_empty_container(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.is_empty(),
+        Value::Array(arr) => arr.is_empty(),
+        _ => false,
+    }
+}
+
+fn is_optional_null_equivalent(path: &str, before: Option<&Value>, after: Option<&Value>) -> bool {
+    if !matches_any_json_pointer_pattern(path, OPTIONAL_NULL_EQ_PATH_PATTERNS) {
+        return false;
+    }
+
+    matches!((before, after), (None, Some(Value::Null)) | (Some(Value::Null), None))
+}
+
+fn is_optional_false_missing_equivalent(
+    path: &str,
+    before: Option<&Value>,
+    after: Option<&Value>,
+) -> bool {
+    if !matches_any_json_pointer_pattern(path, OPTIONAL_FALSE_MISSING_PATH_PATTERNS) {
+        return false;
+    }
+
+    matches!(
+        (before, after),
+        (None, Some(Value::Bool(false))) | (Some(Value::Bool(false)), None)
+    )
+}
+
+fn is_optional_empty_missing_equivalent(
+    path: &str,
+    before: Option<&Value>,
+    after: Option<&Value>,
+) -> bool {
+    if !matches_any_json_pointer_pattern(path, OPTIONAL_EMPTY_MISSING_PATH_PATTERNS) {
+        return false;
+    }
+
+    match (before, after) {
+        (None, Some(value)) | (Some(value), None) => is_empty_container(value),
+        _ => false,
+    }
+}
+
+fn is_semantically_equal(path: &str, before: Option<&Value>, after: Option<&Value>) -> bool {
+    match (before, after) {
+        (None, None) => true,
+        (Some(before_value), Some(after_value)) if before_value == after_value => true,
+        _ => {
+            is_optional_null_equivalent(path, before, after)
+                || is_optional_false_missing_equivalent(path, before, after)
+                || is_optional_empty_missing_equivalent(path, before, after)
+        }
+    }
+}
+
+fn build_diff_item(kind: &str, path: &str, before: Option<&Value>, after: Option<&Value>) -> ConfigDiffItem {
+    let before_redacted = before.map(redact_sensitive_value);
+    let after_redacted = after.map(redact_sensitive_value);
+
+    let before_masked = before_redacted
+        .as_ref()
+        .zip(before)
+        .map(|(redacted, raw)| redacted != raw)
+        .unwrap_or(false);
+    let after_masked = after_redacted
+        .as_ref()
+        .zip(after)
+        .map(|(redacted, raw)| redacted != raw)
+        .unwrap_or(false);
+
+    ConfigDiffItem {
+        kind: kind.to_string(),
+        path: normalize_diff_path(path),
+        before: before_redacted,
+        after: after_redacted,
+        masked: before_masked || after_masked,
+    }
+}
+
+fn collect_diff_items(
+    path: &str,
+    before: Option<&Value>,
+    after: Option<&Value>,
+    changes: &mut Vec<ConfigDiffItem>,
+) {
+    if is_semantically_equal(path, before, after) {
+        return;
+    }
+
+    match (before, after) {
+        (Some(Value::Object(before_obj)), Some(Value::Object(after_obj))) => {
+            let mut keys: Vec<String> = before_obj
+                .keys()
+                .chain(after_obj.keys())
+                .cloned()
+                .collect();
+            keys.sort();
+            keys.dedup();
+
+            for key in keys {
+                let child_path = join_config_path(path, &escape_json_pointer_segment(&key));
+                collect_diff_items(&child_path, before_obj.get(&key), after_obj.get(&key), changes);
+            }
+        }
+        (Some(Value::Array(before_arr)), Some(Value::Array(after_arr))) => {
+            let max_len = before_arr.len().max(after_arr.len());
+            for index in 0..max_len {
+                let child_path = join_config_path(path, &index.to_string());
+                collect_diff_items(&child_path, before_arr.get(index), after_arr.get(index), changes);
+            }
+        }
+        (None, Some(after_value)) => {
+            changes.push(build_diff_item("added", path, None, Some(after_value)));
+        }
+        (Some(before_value), None) => {
+            changes.push(build_diff_item("removed", path, Some(before_value), None));
+        }
+        (Some(before_value), Some(after_value)) => {
+            changes.push(build_diff_item(
+                "modified",
+                path,
+                Some(before_value),
+                Some(after_value),
+            ));
+        }
+        (None, None) => {}
+    }
+}
+
+fn build_config_diff_summary(before: &Value, after: &Value) -> ConfigDiffSummary {
+    let mut changes: Vec<ConfigDiffItem> = Vec::new();
+    collect_diff_items("", Some(before), Some(after), &mut changes);
+
+    let mut summary = ConfigDiffSummary::default();
+    for change in &changes {
+        match change.kind.as_str() {
+            "added" => summary.added += 1,
+            "modified" => summary.modified += 1,
+            "removed" => summary.removed += 1,
+            _ => {}
+        }
+    }
+    summary.changes = changes;
+    summary
+}
+
+fn validate_preview_input(input_config: &Value) -> ConfigValidationResult {
+    let mut issues: Vec<ConfigValidationIssue> = Vec::new();
+
+    if let Err(error) = normalize_and_validate_config(input_config) {
+        issues.push(ConfigValidationIssue {
+            path: "/".to_string(),
+            message: error,
+            variable: None,
+        });
+    }
+
+    let mut replaced = input_config.clone();
+    let env_vars = load_env_file_vars();
+    if let Err(error) = replace_config_vars(&mut replaced, &env_vars, "") {
+        let variable = error
+            .split("缺失变量 ")
+            .nth(1)
+            .map(|part| part.trim().to_string())
+            .filter(|part| !part.is_empty());
+        issues.push(ConfigValidationIssue {
+            path: "/".to_string(),
+            message: error,
+            variable,
+        });
+    }
+
+    ConfigValidationResult {
+        valid: issues.is_empty(),
+        issues,
+    }
+}
+
+fn ensure_backup_dir() -> Result<PathBuf, String> {
+    let backup_dir = PathBuf::from(platform::get_config_dir()).join("backups");
+    fs::create_dir_all(&backup_dir).map_err(|e| format!("创建配置备份目录失败: {}", e))?;
+    Ok(backup_dir)
+}
+
+fn create_backup_filename() -> String {
+    format!("openclaw-{}.json", timestamp_for_backup_name())
+}
+
+fn write_backup_snapshot(config_value: &Value) -> Result<String, String> {
+    let backup_dir = ensure_backup_dir()?;
+    let backup_path = backup_dir.join(create_backup_filename());
+    let backup_path_str = backup_path.to_string_lossy().to_string();
+
+    let content = serde_json::to_string_pretty(config_value)
+        .map_err(|e| format!("序列化备份配置失败: {}", e))?;
+    file::write_file(&backup_path_str, &content)
+        .map_err(|e| format!("写入配置备份失败: {}", e))?;
+
+    Ok(backup_path_str)
+}
+
+fn list_backup_files_sorted() -> Result<Vec<(PathBuf, std::time::SystemTime, u64)>, String> {
+    let backup_dir = ensure_backup_dir()?;
+    let mut items: Vec<(PathBuf, std::time::SystemTime, u64)> = Vec::new();
+
+    let entries = fs::read_dir(&backup_dir).map_err(|e| format!("读取备份目录失败: {}", e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读取备份条目失败: {}", e))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("读取备份元数据失败: {}", e))?;
+        let modified = metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        items.push((path, modified, metadata.len()));
+    }
+
+    items.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(items)
+}
+
+fn resolve_backup_path(backup_path: &str) -> PathBuf {
+    let candidate = PathBuf::from(backup_path);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        PathBuf::from(platform::get_config_dir()).join(backup_path)
+    }
+}
 /// 保存配置
 #[command]
 pub async fn save_config(mut config: Value) -> Result<String, String> {
+
     info!("[保存配置] 保存 openclaw.json 配置...");
     debug!("[保存配置] 请求包含字段: {}", config.as_object().map(|o| o.len()).unwrap_or(0));
 
@@ -293,9 +726,106 @@ pub async fn save_config(mut config: Value) -> Result<String, String> {
     }
 }
 
+#[command]
+pub async fn preview_config_change(input_config: Value) -> Result<PreviewConfigResponse, String> {
+    info!("[配置预览] 开始预览配置变更...");
+
+    let current_config = load_openclaw_config_raw()?;
+    let validation = validate_preview_input(&input_config);
+    let diff_summary = build_config_diff_summary(&current_config, &input_config);
+
+    Ok(PreviewConfigResponse {
+        preview_config: redact_sensitive_value(&input_config),
+        diff_summary,
+        validation,
+    })
+}
+
+#[command]
+pub async fn apply_config_change(input_config: Value) -> Result<ApplyConfigResponse, String> {
+    info!("[配置应用] 开始应用配置变更...");
+
+    let validation = validate_preview_input(&input_config);
+    if !validation.valid {
+        return Err(format!(
+            "配置校验失败: {}",
+            validation
+                .issues
+                .iter()
+                .map(|issue| format!("{}: {}", issue.path, issue.message))
+                .collect::<Vec<String>>()
+                .join("；")
+        ));
+    }
+
+    let mut next_config = normalize_and_validate_config(&input_config)?;
+    let existing_config = load_openclaw_config_raw()?;
+    merge_gateway_critical_fields(&mut next_config, &existing_config);
+
+    let backup_path = write_backup_snapshot(&existing_config)?;
+    save_openclaw_config(&next_config)?;
+
+    Ok(ApplyConfigResponse {
+        backup_path,
+        applied_at: format_now_rfc3339(),
+    })
+}
+
+#[command]
+pub async fn list_config_backups() -> Result<Vec<ConfigBackupItem>, String> {
+    let backups = list_backup_files_sorted()?;
+    let list = backups
+        .into_iter()
+        .map(|(path, modified, size)| ConfigBackupItem {
+            path: path.to_string_lossy().to_string(),
+            created_at: format_timestamp_from_system_time(modified),
+            size,
+        })
+        .collect();
+    Ok(list)
+}
+
+#[command]
+pub async fn rollback_config(backup_path: Option<String>) -> Result<RollbackConfigResponse, String> {
+    info!("[配置回滚] 开始回滚配置...");
+
+    let selected_backup = if let Some(path) = backup_path {
+        if path.trim().is_empty() {
+            return Err("backupPath 不能为空".to_string());
+        }
+        resolve_backup_path(path.trim())
+    } else {
+        let backups = list_backup_files_sorted()?;
+        let (path, _, _) = backups
+            .into_iter()
+            .next()
+            .ok_or_else(|| "未找到可回滚的配置备份".to_string())?;
+        path
+    };
+
+    if !selected_backup.exists() || !selected_backup.is_file() {
+        return Err(format!(
+            "备份文件不存在: {}",
+            selected_backup.to_string_lossy()
+        ));
+    }
+
+    let backup_content = fs::read_to_string(&selected_backup)
+        .map_err(|e| format!("读取备份文件失败: {}", e))?;
+    let backup_value = parse_openclaw_config_content(&backup_content)?;
+    let normalized_backup = normalize_and_validate_config(&backup_value)?;
+
+    save_openclaw_config(&normalized_backup)?;
+
+    Ok(RollbackConfigResponse {
+        restored_path: selected_backup.to_string_lossy().to_string(),
+        restored_at: format_now_rfc3339(),
+    })
+}
 /// 获取 agents.list（向后兼容：不存在时返回 []）
 #[command]
 pub async fn get_agents_list() -> Result<Value, String> {
+
     info!("[Agents List] 获取 agents.list...");
     let config = load_openclaw_config_raw()?;
 
@@ -1699,7 +2229,8 @@ pub async fn install_feishu_plugin() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_env_file_vars, normalize_and_validate_config, parse_openclaw_config_content,
+        build_config_diff_summary, load_env_file_vars, normalize_and_validate_config,
+        parse_openclaw_config_content,
         replace_config_vars, save_openclaw_config,
     };
     use crate::utils::{file as file_utils, platform as platform_utils};
@@ -2149,5 +2680,95 @@ mod tests {
             "错误信息应明确指向 bindings，实际: {}",
             err
         );
+    }
+
+    #[test]
+    fn config_diff_ignores_semantically_equivalent_optional_values() {
+        let before = json!({
+            "agents": {
+                "list": [
+                    {
+                        "id": "main",
+                        "name": "主助手",
+                        "workspace": "/tmp/main"
+                    }
+                ]
+            }
+        });
+
+        let after = json!({
+            "agents": {
+                "list": [
+                    {
+                        "id": "main",
+                        "name": "主助手",
+                        "workspace": "/tmp/main",
+                        "default": false,
+                        "model": {},
+                        "tools": null,
+                        "sandbox": null
+                    }
+                ]
+            },
+            "bindings": []
+        });
+
+        let diff = build_config_diff_summary(&before, &after);
+        assert_eq!(diff.added, 0, "语义等价字段不应计入新增");
+        assert_eq!(diff.modified, 0, "语义等价字段不应计入修改");
+        assert_eq!(diff.removed, 0, "语义等价字段不应计入删除");
+        assert!(diff.changes.is_empty(), "语义等价字段不应产生差异项");
+    }
+
+    #[test]
+    fn config_diff_reports_fine_grained_agent_field_changes() {
+        let before = json!({
+            "agents": {
+                "list": [
+                    {
+                        "id": "agent-1",
+                        "name": "旧名称1"
+                    },
+                    {
+                        "id": "agent-2",
+                        "name": "旧名称2"
+                    }
+                ]
+            }
+        });
+
+        let after = json!({
+            "agents": {
+                "list": [
+                    {
+                        "id": "agent-1",
+                        "name": "新名称1"
+                    },
+                    {
+                        "id": "agent-2",
+                        "name": "新名称2"
+                    }
+                ]
+            }
+        });
+
+        let diff = build_config_diff_summary(&before, &after);
+        assert_eq!(diff.added, 0);
+        assert_eq!(diff.removed, 0);
+        assert_eq!(diff.modified, 2);
+        assert_eq!(diff.changes.len(), 2);
+
+        assert!(diff
+            .changes
+            .iter()
+            .any(|item| item.path == "/agents/list/0/name" && item.kind == "modified"));
+        assert!(diff
+            .changes
+            .iter()
+            .any(|item| item.path == "/agents/list/1/name" && item.kind == "modified"));
+        assert!(!diff
+            .changes
+            .iter()
+            .any(|item| item.path == "/agents" && item.kind == "modified"));
     }
 }
