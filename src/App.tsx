@@ -57,6 +57,49 @@ interface UpdateResult {
   error?: string;
 }
 
+const WEB_AUTH_USERNAME_CACHE_KEY = "OPENCLAW_WEB_USERNAME";
+
+const readCachedUsername = (): string | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const cachedUsername = window.localStorage.getItem(
+      WEB_AUTH_USERNAME_CACHE_KEY
+    );
+    if (!cachedUsername) {
+      return null;
+    }
+
+    const normalizedUsername = cachedUsername.trim();
+    return normalizedUsername.length > 0 ? normalizedUsername : null;
+  } catch (error) {
+    console.warn("读取登录用户名缓存失败", error);
+    return null;
+  }
+};
+
+const writeCachedUsername = (nextUsername: string): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const normalizedUsername = nextUsername.trim();
+  if (!normalizedUsername) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      WEB_AUTH_USERNAME_CACHE_KEY,
+      normalizedUsername
+    );
+  } catch (error) {
+    console.warn("写入登录用户名缓存失败", error);
+  }
+};
+
 function App() {
   const [currentPage, setCurrentPage] = useState<PageType>("dashboard");
   const [isReady, setIsReady] = useState<boolean | null>(null);
@@ -71,7 +114,9 @@ function App() {
   const [authenticated, setAuthenticated] = useState(!webMode);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [username, setUsername] = useState("admin");
+  const [username, setUsername] = useState(() =>
+    webMode ? readCachedUsername() ?? "admin" : "admin"
+  );
   const [password, setPassword] = useState("");
 
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -91,6 +136,7 @@ function App() {
       setAuthenticated(status.authenticated);
       if (status.username) {
         setUsername(status.username);
+        writeCachedUsername(status.username);
       }
       setAuthChecked(true);
     } catch (error) {
@@ -233,6 +279,7 @@ function App() {
       } else {
         await loginWebAdmin(username, password);
       }
+      writeCachedUsername(username);
       setPassword("");
       await refreshAuthStatus();
     } catch (error) {
