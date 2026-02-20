@@ -13,6 +13,7 @@ import {
   Plus,
   Bot,
   Link2,
+  Network,
 } from "lucide-react";
 
 interface InstallResult {
@@ -109,8 +110,51 @@ interface VisualBinding {
   agentId: string;
 }
 
+type GatewayBindPreset = "loopback" | "all" | "custom";
+type GatewayReloadMode = "hybrid" | "hot" | "restart" | "off";
+
+interface ManagedGatewayConfig {
+  port: number;
+  bind: string;
+  trustedProxies: string[];
+  reloadMode: GatewayReloadMode;
+}
+
 const BINDING_KEY_SEPARATOR = "::";
 const MAX_DIFF_DISPLAY = 200;
+const DEFAULT_GATEWAY_CONFIG: ManagedGatewayConfig = {
+  port: 18789,
+  bind: "127.0.0.1",
+  trustedProxies: ["127.0.0.1/32"],
+  reloadMode: "hybrid",
+};
+
+const GATEWAY_RELOAD_MODE_OPTIONS: Array<{
+  value: GatewayReloadMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "hybrid",
+    label: "hybrid（推荐）",
+    description: "优先热重载，必要时自动回退重启，兼顾稳定与效率。",
+  },
+  {
+    value: "hot",
+    label: "hot",
+    description: "仅尝试热重载，速度最快，但对变更类型有要求。",
+  },
+  {
+    value: "restart",
+    label: "restart",
+    description: "每次应用后完整重启，最稳妥但会有短暂中断。",
+  },
+  {
+    value: "off",
+    label: "off",
+    description: "关闭自动重载策略，变更后需手动控制重载。",
+  },
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -442,28 +486,238 @@ function toStableComparable(value: unknown): unknown {
   return value;
 }
 
+function hasDiffSummaryChanges(summary: ConfigDiffSummary): boolean {
+  return summary.added + summary.modified + summary.removed > 0;
+}
+
+function parseGatewayReloadMode(value: unknown): GatewayReloadMode {
+  if (
+    value === "hybrid" ||
+    value === "hot" ||
+    value === "restart" ||
+    value === "off"
+  ) {
+    return value;
+  }
+  return DEFAULT_GATEWAY_CONFIG.reloadMode;
+}
+
+function normalizeGatewayPort(value: unknown): number {
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed)) {
+      return parsed;
+    }
+  }
+  return DEFAULT_GATEWAY_CONFIG.port;
+}
+
+function normalizeGatewayTrustedProxies(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [...DEFAULT_GATEWAY_CONFIG.trustedProxies];
+  }
+
+  const deduped = Array.from(
+    new Set(
+      value
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter((item) => Boolean(item))
+    )
+  );
+
+  return deduped;
+}
+
+function isValidIpv4Address(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+
+  return parts.every((part) => {
+    if (!/^\d+$/.test(part)) {
+      return false;
+    }
+    const num = Number(part);
+    return num >= 0 && num <= 255;
+  });
+}
+
+function isValidIpv6Address(value: string): boolean {
+  if (!value.includes(":")) {
+    return false;
+  }
+  if (!/^[0-9A-Fa-f:]+$/.test(value)) {
+    return false;
+  }
+
+  const doubleColonParts = value.split("::");
+  if (doubleColonParts.length > 2) {
+    return false;
+  }
+
+  const left = doubleColonParts[0]
+    ? doubleColonParts[0].split(":").filter((part) => part.length > 0)
+    : [];
+  const right =
+    doubleColonParts.length === 2 && doubleColonParts[1]
+      ? doubleColonParts[1].split(":").filter((part) => part.length > 0)
+      : [];
+
+  if (
+    [...left, ...right].some(
+      (part) =>
+        part.length === 0 || part.length > 4 || !/^[0-9A-Fa-f]+$/.test(part)
+    )
+  ) {
+    return false;
+  }
+
+  if (doubleColonParts.length === 1) {
+    return left.length === 8;
+  }
+
+  return left.length + right.length < 8;
+}
+
+function isValidIpOrCidr(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const parts = trimmed.split("/");
+  if (parts.length > 2) {
+    return false;
+  }
+
+  const ipPart = parts[0];
+  const cidrPart = parts[1];
+  const isIpv4 = isValidIpv4Address(ipPart);
+  const isIpv6 = !isIpv4 && isValidIpv6Address(ipPart);
+
+  if (!isIpv4 && !isIpv6) {
+    return false;
+  }
+
+  if (cidrPart === undefined) {
+    return true;
+  }
+
+  if (!/^\d+$/.test(cidrPart)) {
+    return false;
+  }
+
+  const prefix = Number(cidrPart);
+  return isIpv4 ? prefix >= 0 && prefix <= 32 : prefix >= 0 && prefix <= 128;
+}
+
+function parseTrustedProxyInput(value: string): string[] {
+  return value
+    .split(/[\s,，;；]+/)
+    .map((item) => item.trim())
+    .filter((item) => Boolean(item));
+}
+
+function serializeTrustedProxyInput(values: string[]): string {
+  return values.join("\n");
+}
+
+function detectGatewayBindPreset(bind: string): GatewayBindPreset {
+  const normalized = bind.trim();
+  if (normalized === "127.0.0.1") {
+    return "loopback";
+  }
+  if (normalized === "0.0.0.0" || normalized === "::") {
+    return "all";
+  }
+  return "custom";
+}
+
+function parseGatewayConfig(config: unknown): ManagedGatewayConfig {
+  if (!isRecord(config)) {
+    return { ...DEFAULT_GATEWAY_CONFIG };
+  }
+
+  const gateway = isRecord(config.gateway) ? config.gateway : {};
+  const reload = isRecord(gateway.reload) ? gateway.reload : {};
+
+  return {
+    port: normalizeGatewayPort(gateway.port),
+    bind:
+      typeof gateway.bind === "string" && gateway.bind.trim()
+        ? gateway.bind.trim()
+        : DEFAULT_GATEWAY_CONFIG.bind,
+    trustedProxies: normalizeGatewayTrustedProxies(gateway.trustedProxies),
+    reloadMode: parseGatewayReloadMode(reload.mode),
+  };
+}
+
+function normalizeManagedGateway(
+  gateway: ManagedGatewayConfig
+): ManagedGatewayConfig {
+  return {
+    port: Math.trunc(gateway.port),
+    bind: gateway.bind.trim(),
+    trustedProxies: Array.from(
+      new Set(
+        gateway.trustedProxies
+          .map((item) => item.trim())
+          .filter((item) => Boolean(item))
+      )
+    ),
+    reloadMode: gateway.reloadMode,
+  };
+}
+
+function normalizeVisualConfig(
+  agents: VisualAgent[],
+  bindings: VisualBinding[],
+  gateway: ManagedGatewayConfig
+): {
+  agents: VisualAgent[];
+  bindings: VisualBinding[];
+  gateway: ManagedGatewayConfig;
+} {
+  return {
+    agents: normalizeVisualAgents(agents),
+    bindings: normalizeVisualBindings(bindings),
+    gateway: normalizeManagedGateway(gateway),
+  };
+}
+
 function buildManagedConfigSignature(
   agents: VisualAgent[],
-  bindings: VisualBinding[]
+  bindings: VisualBinding[],
+  gateway: ManagedGatewayConfig
 ): string {
-  const agentsPayload = buildAgentsPayload(normalizeVisualAgents(agents));
-  const bindingsMap = bindingsRulesToMap(normalizeVisualBindings(bindings));
+  const normalized = normalizeVisualConfig(agents, bindings, gateway);
+  const agentsPayload = buildAgentsPayload(normalized.agents);
+  const bindingsMap = bindingsRulesToMap(normalized.bindings);
 
   return JSON.stringify(
     toStableComparable({
       agents: agentsPayload,
       bindings: bindingsMap,
+      gateway: {
+        port: normalized.gateway.port,
+        bind: normalized.gateway.bind,
+        trustedProxies: normalized.gateway.trustedProxies,
+        reload: {
+          mode: normalized.gateway.reloadMode,
+        },
+      },
     })
   );
 }
 
-function hasDiffSummaryChanges(summary: ConfigDiffSummary): boolean {
-  return summary.added + summary.modified + summary.removed > 0;
-}
-
 function validateVisualConfig(
   agents: VisualAgent[],
-  bindings: VisualBinding[]
+  bindings: VisualBinding[],
+  gateway: ManagedGatewayConfig
 ): string | null {
   const idSet = new Set<string>();
   for (let i = 0; i < agents.length; i += 1) {
@@ -497,6 +751,37 @@ function validateVisualConfig(
     }
   }
 
+  if (
+    !Number.isInteger(gateway.port) ||
+    gateway.port < 1 ||
+    gateway.port > 65535
+  ) {
+    return "Gateway 端口无效：port 必须为 1~65535 的整数";
+  }
+
+  if (!gateway.bind.trim()) {
+    return "Gateway 绑定地址无效：bind 不能为空";
+  }
+
+  if (
+    gateway.reloadMode !== "hybrid" &&
+    gateway.reloadMode !== "hot" &&
+    gateway.reloadMode !== "restart" &&
+    gateway.reloadMode !== "off"
+  ) {
+    return "Gateway 重载模式无效：仅支持 hybrid / hot / restart / off";
+  }
+
+  const trustedProxies = normalizeGatewayTrustedProxies(gateway.trustedProxies);
+  for (let i = 0; i < trustedProxies.length; i += 1) {
+    const proxy = trustedProxies[i];
+    if (!isValidIpOrCidr(proxy)) {
+      return `Gateway trustedProxies 第 ${
+        i + 1
+      } 项格式无效：${proxy}（仅支持 IP/CIDR）`;
+    }
+  }
+
   return null;
 }
 
@@ -510,6 +795,17 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const [uninstalling, setUninstalling] = useState(false);
   const [uninstallResult, setUninstallResult] = useState<InstallResult | null>(
     null
+  );
+
+  const [gatewayConfig, setGatewayConfig] = useState<ManagedGatewayConfig>({
+    ...DEFAULT_GATEWAY_CONFIG,
+  });
+  const [gatewayPortInput, setGatewayPortInput] = useState(
+    String(DEFAULT_GATEWAY_CONFIG.port)
+  );
+  const [gatewayTrustedProxyInput, setGatewayTrustedProxyInput] = useState("");
+  const [gatewayBindPreset, setGatewayBindPreset] = useState<GatewayBindPreset>(
+    detectGatewayBindPreset(DEFAULT_GATEWAY_CONFIG.bind)
   );
 
   const [agentsListText, setAgentsListText] = useState("[]");
@@ -540,7 +836,11 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
   const managedConfigSignature = useMemo(() => {
     if (!expertMode) {
-      return buildManagedConfigSignature(visualAgents, visualBindings);
+      return buildManagedConfigSignature(
+        visualAgents,
+        visualBindings,
+        gatewayConfig
+      );
     }
 
     try {
@@ -557,12 +857,20 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
       return buildManagedConfigSignature(
         parseAgentsList(parsedAgentsList),
-        bindingsMapToRules(parseBindings(parsedBindings))
+        bindingsMapToRules(parseBindings(parsedBindings)),
+        gatewayConfig
       );
     } catch {
       return "__invalid_json__";
     }
-  }, [expertMode, visualAgents, visualBindings, agentsListText, bindingsText]);
+  }, [
+    expertMode,
+    visualAgents,
+    visualBindings,
+    gatewayConfig,
+    agentsListText,
+    bindingsText,
+  ]);
 
   const hasPendingChanges = useMemo(() => {
     if (!baselineManagedSignature) {
@@ -610,6 +918,37 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     );
   }, [visualAgents]);
 
+  const selectedGatewayReloadModeOption = useMemo(() => {
+    return GATEWAY_RELOAD_MODE_OPTIONS.find(
+      (option) => option.value === gatewayConfig.reloadMode
+    );
+  }, [gatewayConfig.reloadMode]);
+
+  const gatewayValidationHint = useMemo(() => {
+    const trimmedBind = gatewayConfig.bind.trim();
+    if (!trimmedBind) {
+      return "Gateway 绑定地址无效：bind 不能为空";
+    }
+
+    const portNumber = Number(gatewayPortInput);
+    if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+      return "Gateway 端口无效：port 必须为 1~65535 的整数";
+    }
+
+    const trustedProxyCandidates = normalizeGatewayTrustedProxies(
+      gatewayConfig.trustedProxies
+    );
+
+    const invalidProxy = trustedProxyCandidates.find(
+      (proxy) => !isValidIpOrCidr(proxy)
+    );
+    if (invalidProxy) {
+      return `Gateway trustedProxies 格式无效：${invalidProxy}（仅支持 IP/CIDR）`;
+    }
+
+    return null;
+  }, [gatewayConfig.bind, gatewayConfig.trustedProxies, gatewayPortInput]);
+
   const syncJsonTextFromVisual = (
     nextAgents: VisualAgent[],
     nextBindings: VisualBinding[],
@@ -625,7 +964,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
   const buildGlobalInputConfigPayload = async (
     agentsList: Record<string, unknown>[],
-    bindingsPayload: BindingsPayload
+    bindingsPayload: BindingsPayload,
+    managedGateway: ManagedGatewayConfig
   ) => {
     const fullConfig = await invoke<Record<string, unknown>>("get_config");
     const merged = {
@@ -638,6 +978,24 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         list: agentsList,
       },
       bindings: bindingsPayload as unknown as Record<string, unknown>,
+      gateway: {
+        ...(isRecord(fullConfig.gateway)
+          ? (fullConfig.gateway as Record<string, unknown>)
+          : {}),
+        port: managedGateway.port,
+        bind: managedGateway.bind,
+        trustedProxies: managedGateway.trustedProxies,
+        reload: {
+          ...(isRecord(fullConfig.gateway) &&
+          isRecord((fullConfig.gateway as Record<string, unknown>).reload)
+            ? ((fullConfig.gateway as Record<string, unknown>).reload as Record<
+                string,
+                unknown
+              >)
+            : {}),
+          mode: managedGateway.reloadMode,
+        },
+      },
     };
     return merged as Record<string, unknown>;
   };
@@ -651,8 +1009,11 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     };
     normalizedAgents: VisualAgent[];
     normalizedBindings: VisualBinding[];
+    normalizedGateway: ManagedGatewayConfig;
     bindingsPayload: BindingsPayload;
   } => {
+    const normalizedGateway = normalizeManagedGateway(gatewayConfig);
+
     if (expertMode) {
       const parsedAgentsList = JSON.parse(agentsListText);
       const parsedBindings = JSON.parse(bindingsText) as BindingsPayload;
@@ -664,6 +1025,19 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         throw new Error("bindings 结构无效：必须为数组或对象");
       }
 
+      const normalizedAgents = parseAgentsList(parsedAgentsList);
+      const normalizedBindings = bindingsMapToRules(
+        parseBindings(parsedBindings)
+      );
+      const validationError = validateVisualConfig(
+        normalizedAgents,
+        normalizedBindings,
+        normalizedGateway
+      );
+      if (validationError) {
+        throw new Error(validationError);
+      }
+
       return {
         inputConfig: {
           agents: {
@@ -671,8 +1045,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           },
           bindings: parsedBindings,
         },
-        normalizedAgents: parseAgentsList(parsedAgentsList),
-        normalizedBindings: bindingsMapToRules(parseBindings(parsedBindings)),
+        normalizedAgents,
+        normalizedBindings,
+        normalizedGateway,
         bindingsPayload: parsedBindings,
       };
     }
@@ -682,7 +1057,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
     const validationError = validateVisualConfig(
       normalizedAgents,
-      normalizedBindings
+      normalizedBindings,
+      normalizedGateway
     );
     if (validationError) {
       throw new Error(validationError);
@@ -701,6 +1077,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       },
       normalizedAgents,
       normalizedBindings,
+      normalizedGateway,
       bindingsPayload,
     };
   };
@@ -715,9 +1092,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       const payload = buildInputConfigPayload();
       const globalInputConfig = await buildGlobalInputConfigPayload(
         buildAgentsPayload(payload.normalizedAgents),
-        payload.bindingsPayload
+        payload.bindingsPayload,
+        payload.normalizedGateway
       );
-
       const result = await invoke<PreviewConfigResponse>(
         "preview_config_change",
         {
@@ -757,10 +1134,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
     try {
       const payload = buildInputConfigPayload();
-
       const globalInputConfig = await buildGlobalInputConfigPayload(
         buildAgentsPayload(payload.normalizedAgents),
-        payload.bindingsPayload
+        payload.bindingsPayload,
+        payload.normalizedGateway
       );
 
       const preview = await invoke<PreviewConfigResponse>(
@@ -799,10 +1176,19 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         JSON.stringify(buildAgentsPayload(payload.normalizedAgents), null, 2)
       );
       setBindingsText(JSON.stringify(payload.bindingsPayload, null, 2));
+      setGatewayConfig(payload.normalizedGateway);
+      setGatewayPortInput(String(payload.normalizedGateway.port));
+      setGatewayTrustedProxyInput(
+        serializeTrustedProxyInput(payload.normalizedGateway.trustedProxies)
+      );
+      setGatewayBindPreset(
+        detectGatewayBindPreset(payload.normalizedGateway.bind)
+      );
       setBaselineManagedSignature(
         buildManagedConfigSignature(
           payload.normalizedAgents,
-          payload.normalizedBindings
+          payload.normalizedBindings,
+          payload.normalizedGateway
         )
       );
       setConfigMessage(
@@ -817,7 +1203,6 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   };
 
   const handleOpenRollbackDialog = async () => {
-    setRollbackLoading(true);
     setConfigError(null);
     setConfigMessage(null);
 
@@ -853,26 +1238,37 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         backupPath: selectedBackupPath,
       });
 
-      const [agentsResult, bindingsResult, channelsResult] = await Promise.all([
-        invoke<unknown>("get_agents_list"),
-        invoke<unknown>("get_bindings"),
-        invoke<ChannelConfig[]>("get_channels_config"),
-      ]);
+      const [agentsResult, bindingsResult, channelsResult, fullConfigResult] =
+        await Promise.all([
+          invoke<unknown>("get_agents_list"),
+          invoke<unknown>("get_bindings"),
+          invoke<ChannelConfig[]>("get_channels_config"),
+          invoke<Record<string, unknown>>("get_config"),
+        ]);
 
       const nextVisualAgents = parseAgentsList(agentsResult);
       const nextVisualBindings = bindingsMapToRules(
         parseBindings(bindingsResult)
       );
+      const nextGatewayConfig = parseGatewayConfig(fullConfigResult);
 
       setVisualAgents(nextVisualAgents);
       setVisualBindings(nextVisualBindings);
       setBindingsRaw(bindingsResult);
       setAgentsListText(JSON.stringify(agentsResult ?? [], null, 2));
       setBindingsText(JSON.stringify(bindingsResult ?? [], null, 2));
+      setGatewayConfig(nextGatewayConfig);
+      setGatewayPortInput(String(nextGatewayConfig.port));
+      setGatewayTrustedProxyInput(nextGatewayConfig.trustedProxies.join("\n"));
+      setGatewayBindPreset(detectGatewayBindPreset(nextGatewayConfig.bind));
       setChannelsConfig(channelsResult ?? []);
       setPreviewResult(null);
       setBaselineManagedSignature(
-        buildManagedConfigSignature(nextVisualAgents, nextVisualBindings)
+        buildManagedConfigSignature(
+          nextVisualAgents,
+          nextVisualBindings,
+          nextGatewayConfig
+        )
       );
       setShowRollbackDialog(false);
       setConfigMessage(
@@ -945,11 +1341,12 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setConfigError(null);
 
       try {
-        const [agentsResult, bindingsResult, channelsResult] =
+        const [agentsResult, bindingsResult, channelsResult, fullConfigResult] =
           await Promise.allSettled([
             invoke<unknown>("get_agents_list"),
             invoke<unknown>("get_bindings"),
             invoke<ChannelConfig[]>("get_channels_config"),
+            invoke<Record<string, unknown>>("get_config"),
           ]);
 
         const warnings: string[] = [];
@@ -984,6 +1381,16 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           warnings.push("获取渠道配置失败，已降级为空");
         }
 
+        const loadedFullConfig =
+          fullConfigResult.status === "fulfilled" ? fullConfigResult.value : {};
+        if (fullConfigResult.status === "rejected") {
+          console.warn(
+            "获取完整配置失败，Gateway 配置回退默认值:",
+            fullConfigResult.reason
+          );
+          warnings.push("获取 gateway 配置失败，已回退默认值");
+        }
+
         const parsedBindings = bindingsMapToRules(
           parseBindings(loadedBindings)
         );
@@ -992,13 +1399,25 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         setBindingsText(JSON.stringify(loadedBindings ?? [], null, 2));
         const nextVisualAgents = parseAgentsList(agentsList);
         const nextVisualBindings = parsedBindings;
+        const nextGatewayConfig = parseGatewayConfig(loadedFullConfig);
 
         setVisualAgents(nextVisualAgents);
         setVisualBindings(nextVisualBindings);
         setBindingsRaw(loadedBindings ?? []);
         setChannelsConfig(loadedChannels ?? []);
+        setGatewayConfig(nextGatewayConfig);
+        setGatewayPortInput(String(nextGatewayConfig.port));
+        setGatewayTrustedProxyInput(
+          serializeTrustedProxyInput(nextGatewayConfig.trustedProxies)
+        );
+        setGatewayBindPreset(detectGatewayBindPreset(nextGatewayConfig.bind));
+
         setBaselineManagedSignature(
-          buildManagedConfigSignature(nextVisualAgents, nextVisualBindings)
+          buildManagedConfigSignature(
+            nextVisualAgents,
+            nextVisualBindings,
+            nextGatewayConfig
+          )
         );
 
         if (warnings.length > 0) {
@@ -1037,9 +1456,27 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         throw new Error("bindings 结构无效：必须为数组或对象");
       }
 
-      setVisualAgents(parseAgentsList(parsedAgents));
-      setVisualBindings(bindingsMapToRules(parseBindings(parsedBindings)));
+      const nextVisualAgents = parseAgentsList(parsedAgents);
+      const nextVisualBindings = bindingsMapToRules(
+        parseBindings(parsedBindings)
+      );
+      const nextGateway = normalizeManagedGateway(gatewayConfig);
+      const validationError = validateVisualConfig(
+        nextVisualAgents,
+        nextVisualBindings,
+        nextGateway
+      );
+      if (validationError) {
+        throw new Error(validationError);
+      }
+
+      setVisualAgents(nextVisualAgents);
+      setVisualBindings(nextVisualBindings);
       setBindingsRaw(parsedBindings);
+      setGatewayConfig(nextGateway);
+      setGatewayPortInput(String(nextGateway.port));
+      setGatewayTrustedProxyInput(nextGateway.trustedProxies.join("\n"));
+      setGatewayBindPreset(detectGatewayBindPreset(nextGateway.bind));
       setExpertMode(false);
     } catch (e) {
       console.error("专家模式切换失败:", e);
@@ -1189,9 +1626,166 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     await handleApplyConfig();
   };
 
+  const handleGatewayPortInputChange = (value: string) => {
+    setGatewayPortInput(value);
+    setGatewayConfig((prev) => ({
+      ...prev,
+      port: Number(value),
+    }));
+  };
+
+  const handleGatewayBindPresetChange = (preset: GatewayBindPreset) => {
+    setGatewayBindPreset(preset);
+    if (preset === "loopback") {
+      setGatewayConfig((prev) => ({
+        ...prev,
+        bind: "127.0.0.1",
+      }));
+      return;
+    }
+    if (preset === "all") {
+      setGatewayConfig((prev) => ({
+        ...prev,
+        bind: "0.0.0.0",
+      }));
+    }
+  };
+
+  const handleGatewayBindInputChange = (value: string) => {
+    setGatewayBindPreset(detectGatewayBindPreset(value));
+    setGatewayConfig((prev) => ({
+      ...prev,
+      bind: value,
+    }));
+  };
+
+  const handleGatewayTrustedProxyInputChange = (value: string) => {
+    setGatewayTrustedProxyInput(value);
+    setGatewayConfig((prev) => ({
+      ...prev,
+      trustedProxies: parseTrustedProxyInput(value),
+    }));
+  };
+
+  const handleGatewayReloadModeChange = (value: GatewayReloadMode) => {
+    setGatewayConfig((prev) => ({
+      ...prev,
+      reloadMode: value,
+    }));
+  };
+
   return (
     <div className="module-page-shell">
       <div className="max-w-2xl space-y-6">
+        {/* Gateway 配置 */}
+        <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 rounded-xl bg-indigo-500/20 flex items-center justify-center">
+              <Network size={20} className="text-indigo-300" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-white">Gateway 配置</h3>
+              <p className="text-xs text-gray-500">Web Server 顶部入口参数</p>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">
+                监听端口
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                value={gatewayPortInput}
+                onChange={(e) => handleGatewayPortInputChange(e.target.value)}
+                className="input-base"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">
+                绑定地址
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <select
+                  value={gatewayBindPreset}
+                  onChange={(e) =>
+                    handleGatewayBindPresetChange(
+                      e.target.value as GatewayBindPreset
+                    )
+                  }
+                  className="input-base"
+                >
+                  <option value="loopback">仅本机（127.0.0.1）</option>
+                  <option value="all">全部网卡（0.0.0.0）</option>
+                  <option value="custom">自定义</option>
+                </select>
+                <input
+                  type="text"
+                  value={gatewayConfig.bind}
+                  onChange={(e) => handleGatewayBindInputChange(e.target.value)}
+                  disabled={gatewayBindPreset !== "custom"}
+                  className="input-base disabled:opacity-60"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">
+                trustedProxies
+              </label>
+              <textarea
+                value={gatewayTrustedProxyInput}
+                onChange={(e) =>
+                  handleGatewayTrustedProxyInputChange(e.target.value)
+                }
+                rows={4}
+                className="input-base font-mono text-xs"
+                placeholder={"127.0.0.1/32\n10.0.0.0/8"}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                支持空格、换行、逗号、分号分隔。
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">
+                重载模式
+              </label>
+              <select
+                value={gatewayConfig.reloadMode}
+                onChange={(e) =>
+                  handleGatewayReloadModeChange(
+                    e.target.value as GatewayReloadMode
+                  )
+                }
+                className="input-base"
+              >
+                {GATEWAY_RELOAD_MODE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              {selectedGatewayReloadModeOption && (
+                <p className="text-xs text-gray-500 mt-1">
+                  {selectedGatewayReloadModeOption.description}
+                </p>
+              )}
+            </div>
+
+            <div
+              className={`text-xs ${
+                gatewayValidationHint ? "text-amber-300" : "text-emerald-300"
+              }`}
+            >
+              {gatewayValidationHint ?? "Gateway 参数校验通过"}
+            </div>
+          </div>
+        </div>
+
         {/* 身份配置 */}
         <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
           <div className="flex items-center gap-3 mb-6">
