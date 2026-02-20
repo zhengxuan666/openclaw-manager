@@ -127,10 +127,10 @@
 | 领域             | 官方规范要求               | 当前代码支持                          | 当前配置使用         | 结论                        |
 | ---------------- | -------------------------- | ------------------------------------- | -------------------- | --------------------------- |
 | JSON5            | 官方要求 JSON5             | **已支持读取 JSON5（向下兼容 JSON）** | 使用 JSON/JSON5 均可 | **已完成（写回仍为 JSON）** |
-| `agents.list`    | 官方支持多 agent           | **未结构化支持**                      | 已使用               | **功能缺口**                |
-| `bindings`       | 官方支持                   | **未读取/写入**                       | 已使用               | **功能缺口**                |
+| `agents.list`    | 官方支持多 agent           | **已结构化支持（读写/校验/UI）**      | 已使用               | **已完成（当前范围）**      |
+| `bindings`       | 官方支持                   | **已结构化支持（读写/校验/UI）**      | 已使用               | **已完成（当前范围）**      |
 | `channels`       | 官方支持多策略 / allowlist | 部分读取写入                          | 已使用               | **部分支持**                |
-| `gateway.reload` | 官方支持                   | 未支持                                | 未使用               | **功能缺口**                |
+| `gateway.reload` | 官方支持                   | **已支持 `gateway.reload.mode`（UI/读写/校验）** | 已使用               | **已完成（当前范围）**      |
 | `$include`       | 官方支持                   | 未支持                                | 未使用               | **缺口（可选）**            |
 | `env` & `${VAR}` | 官方支持                   | 支持 env 文件读取，但**未做变量替换** | 未使用               | **功能缺口**                |
 
@@ -148,15 +148,22 @@
 
 - 解析失败时会返回明确的“JSON/JSON5 解析失败”语义错误，便于前端提示
 
-## 4.2 已使用配置字段无结构化支持
+## 4.2 已使用配置字段无结构化支持（部分已完成）
 
-- `agents.list` / `bindings` / `tools` / `messages` / `commands` / `web`
-- 这些字段在配置里存在，但**代码不识别、不校验、不提供 UI 管理**
+已完成：
+
+- `agents.list`（结构化模型 + 读写 + 校验 + UI）
+- `bindings`（结构化模型 + 读写 + 校验 + UI，兼容数组/对象）
+
+仍待完善：
+
+- `tools` / `messages` / `commands` / `web`
+- 这些字段在配置里存在，但当前仍缺完整结构化管理与可视化能力
 
 建议：
 
-- 至少在 `OpenClawConfig` 中添加结构体字段或 `serde_json::Value`
-- 提供读取与展示，避免“存在但系统不可见”
+- 按模块逐步补齐结构字段与 UI 管理入口
+- 保持“未知字段不破坏”的兼容策略，避免一次性重构风险
 
 ## 4.3 channels 多账号策略（已完成）
 
@@ -192,14 +199,19 @@
 - 缺失变量或占位符语法不完整时，读取整体失败，并返回“配置路径 + 变量名/错误原因”
 - 写回仍保持 `serde_json::to_string_pretty`，不会将替换后的敏感值反写入配置文件
 
-## 5.3 增补 gateway 关键字段支持
+## 5.3 增补 gateway 关键字段支持（已完成当前范围）
 
 - 官方：`port/bind/auth/reload/trustedProxies` 等
-- 当前仅 `mode/auth.token`
+- 当前已支持并可视化管理：
+  - `gateway.port`
+  - `gateway.bind`
+  - `gateway.trustedProxies`
+  - `gateway.reload.mode`
 
-建议：
+说明：
 
-- 模型结构扩展 + UI 展示 + 保存逻辑
+- 已接入设置页顶部 Gateway 模块，并接入预览/比对/应用流程
+- 仍可继续扩展 auth/reload 其它子字段的精细化 UI（后续优化项）
 
 ## 5.4 支持 session / hooks / cron / heartbeat
 
@@ -214,12 +226,12 @@
 
 ## 6. 基于你当前配置的具体整改建议
 
-1. **配置解析升级为 JSON5**（必须）
-2. **为 `agents.list` / `bindings` 提供结构支持**（你的配置已使用）
-3. **多账号 channels 支持**（你的 telegram 配置已使用）
-4. **环境变量替换支持**（你现在明文 key，升级后可安全存储）
-5. **补齐 gateway.port/bind/trustedProxies 等字段**（与你配置一致）
-6. **插件 allow 中空字符串清理**（潜在 schema 风险）
+1. **配置解析升级为 JSON5**（已完成）
+2. **为 `agents.list` / `bindings` 提供结构支持**（已完成）
+3. **多账号 channels 支持**（已完成）
+4. **环境变量替换支持**（已完成）
+5. **补齐 gateway.port/bind/trustedProxies 等字段**（已完成当前范围）
+6. **插件 allow 中空字符串清理**（待处理，潜在 schema 风险）
 
 ---
 
@@ -227,14 +239,17 @@
 
 当前项目的配置管理能力**显著落后于官方规范**，且与你实际使用配置存在结构化鸿沟。优先建议：
 
-**第一优先级**：
+**已完成核心基线**：
 
-- JSON5 支持
+- JSON5 读取兼容
 - agents.list / bindings / channels.accounts 结构化支持
-
-**第二优先级**：
-
 - env 变量替换
-- gateway 扩展字段
+- gateway 关键字段（port/bind/trustedProxies/reload.mode）
 
-按此补齐后，项目可达到“官方规范一致 + 现有配置可视化可管理”的基线。
+**下一阶段优先级**：
+
+1) `tools` / `messages` / `commands` / `web` 结构化与可视化管理
+2) `$include` 分拆配置支持
+3) hooks / cron / heartbeat / sessions 的配置管理能力补齐
+
+按此推进后，项目将从“配置可用”升级到“官方能力面可管理”。
