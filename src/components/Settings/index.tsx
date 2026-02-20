@@ -14,6 +14,8 @@ import {
   Bot,
   Link2,
   Network,
+  ArrowLeft,
+  ChevronRight,
 } from "lucide-react";
 
 interface InstallResult {
@@ -119,6 +121,43 @@ interface ManagedGatewayConfig {
   trustedProxies: string[];
   reloadMode: GatewayReloadMode;
 }
+
+type ConfigCenterView = "general" | "center";
+type ConfigCenterTab = "agent" | "routing" | "runtime" | "advanced";
+
+const CONFIG_CENTER_TABS: Array<{ key: ConfigCenterTab; label: string }> = [
+  { key: "agent", label: "Agent" },
+  { key: "routing", label: "Routing" },
+  { key: "runtime", label: "Runtime" },
+  { key: "advanced", label: "高级(JSON)" },
+];
+
+const RUNTIME_PLACEHOLDER_CARDS: Array<{
+  key: string;
+  title: string;
+  description: string;
+}> = [
+  {
+    key: "commands",
+    title: "Commands",
+    description: "命令执行链路与隔离策略（占位，Phase 2 接入）",
+  },
+  {
+    key: "messages",
+    title: "Messages",
+    description: "消息协议与队列策略（占位，Phase 2 接入）",
+  },
+  {
+    key: "web",
+    title: "Web",
+    description: "Web 访问入口策略（占位，Phase 2 接入）",
+  },
+  {
+    key: "tools",
+    title: "Tools",
+    description: "工具调用白名单与限流（占位，Phase 2 接入）",
+  },
+];
 
 const BINDING_KEY_SEPARATOR = "::";
 const MAX_DIFF_DISPLAY = 200;
@@ -818,6 +857,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const [configSuccessMessage, setConfigSuccessMessage] = useState<
     string | null
   >(null);
+  const [configCenterView, setConfigCenterView] =
+    useState<ConfigCenterView>("general");
+  const [activeCenterTab, setActiveCenterTab] =
+    useState<ConfigCenterTab>("agent");
   const [expertMode, setExpertMode] = useState(false);
 
   const [visualAgents, setVisualAgents] = useState<VisualAgent[]>([]);
@@ -1434,16 +1477,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     loadAgentAndBindingConfig();
   }, []);
 
-  const handleExpertModeToggle = (enabled: boolean) => {
-    setConfigError(null);
-    setConfigMessage(null);
-
-    if (enabled) {
-      syncJsonTextFromVisual(visualAgents, visualBindings, bindingsRaw);
-      setExpertMode(true);
-      return;
-    }
-
+  const syncVisualModeFromJson = (): boolean => {
     try {
       const parsedAgents = JSON.parse(agentsListText);
       const parsedBindings = JSON.parse(bindingsText);
@@ -1478,10 +1512,65 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setGatewayTrustedProxyInput(nextGateway.trustedProxies.join("\n"));
       setGatewayBindPreset(detectGatewayBindPreset(nextGateway.bind));
       setExpertMode(false);
+      return true;
     } catch (e) {
       console.error("专家模式切换失败:", e);
       setConfigError(`专家模式 JSON 无效，无法切换到可视化：${String(e)}`);
+      return false;
     }
+  };
+
+  const handleExpertModeToggle = (enabled: boolean) => {
+    setConfigError(null);
+    setConfigMessage(null);
+
+    if (enabled) {
+      syncJsonTextFromVisual(visualAgents, visualBindings, bindingsRaw);
+      setExpertMode(true);
+      return;
+    }
+
+    syncVisualModeFromJson();
+  };
+
+  const handleConfigCenterTabChange = (tab: ConfigCenterTab) => {
+    setConfigError(null);
+    setConfigMessage(null);
+
+    if (tab === activeCenterTab) {
+      return;
+    }
+
+    if (tab === "advanced") {
+      if (!expertMode) {
+        syncJsonTextFromVisual(visualAgents, visualBindings, bindingsRaw);
+        setExpertMode(true);
+      }
+      setActiveCenterTab(tab);
+      return;
+    }
+
+    if (expertMode && !syncVisualModeFromJson()) {
+      return;
+    }
+
+    setActiveCenterTab(tab);
+  };
+
+  const handleOpenConfigCenter = () => {
+    setConfigCenterView("center");
+    setActiveCenterTab("agent");
+  };
+
+  const handleExitConfigCenter = () => {
+    setConfigError(null);
+    setConfigMessage(null);
+
+    if (expertMode && !syncVisualModeFromJson()) {
+      return;
+    }
+
+    setConfigCenterView("general");
   };
 
   const handleAddAgent = () => {
@@ -1674,22 +1763,333 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     }));
   };
 
-  return (
-    <div className="module-page-shell">
-      <div className="max-w-2xl space-y-6">
-        {/* Gateway 配置 */}
-        <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-indigo-500/20 flex items-center justify-center">
-              <Network size={20} className="text-indigo-300" />
+  const configCenterPanel = (
+    <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500 space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleExitConfigCenter}
+            className="p-2 rounded-lg bg-dark-600 hover:bg-dark-500 transition-colors"
+            title="返回设置页"
+          >
+            <ArrowLeft size={16} className="text-gray-300" />
+          </button>
+          <div>
+            <h3 className="text-lg font-semibold text-white">
+              Agent & Runtime 配置中心
+            </h3>
+            <p className="text-xs text-gray-500">
+              二级视图：统一管理 Agent、Routing、Runtime 与高级(JSON)
+            </p>
+          </div>
+        </div>
+        {hasPendingChanges && (
+          <div className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+            检测到未应用变更
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {CONFIG_CENTER_TABS.map((tab) => {
+          const isActive = activeCenterTab === tab.key;
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => handleConfigCenterTabChange(tab.key)}
+              className={`px-4 py-2.5 rounded-lg text-sm transition-colors min-h-[40px] ${
+                isActive
+                  ? "bg-cyan-500 text-white"
+                  : "bg-dark-600 text-gray-300 hover:bg-dark-500"
+              }`}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeCenterTab === "agent" && (
+        <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Bot size={16} className="text-cyan-400" />
+              <h4 className="text-sm font-semibold text-white">Agent 管理</h4>
             </div>
-            <div>
-              <h3 className="text-lg font-semibold text-white">Gateway 配置</h3>
-              <p className="text-xs text-gray-500">Web Server 顶部入口参数</p>
-            </div>
+            <button
+              type="button"
+              onClick={handleAddAgent}
+              className="px-3 py-2.5 min-h-[40px] rounded-lg bg-dark-500 hover:bg-dark-400 text-sm text-white transition-colors flex items-center gap-2"
+            >
+              <Plus size={16} />
+              新增 Agent
+            </button>
           </div>
 
-          <div className="space-y-4">
+          <p className="text-xs text-gray-500">
+            字段：id（必填且唯一）、name（可选）、workspace（可选）、default（可选）
+          </p>
+
+          {visualAgents.length === 0 ? (
+            <div className="text-xs text-gray-500 p-3 rounded-lg bg-dark-700/60 border border-dashed border-dark-500">
+              暂无 Agent，请先新增。
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {visualAgents.map((agent, index) => (
+                <div
+                  key={`agent-${index}`}
+                  className="p-3 rounded-lg bg-dark-700/70 border border-dark-500 space-y-3"
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">
+                        id *
+                      </label>
+                      <input
+                        type="text"
+                        value={agent.id}
+                        onChange={(e) =>
+                          handleAgentFieldChange(index, "id", e.target.value)
+                        }
+                        placeholder="例如：assistant"
+                        className="input-base text-sm"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">
+                        name
+                      </label>
+                      <input
+                        type="text"
+                        value={agent.name}
+                        onChange={(e) =>
+                          handleAgentFieldChange(index, "name", e.target.value)
+                        }
+                        placeholder="可选显示名称"
+                        className="input-base text-sm"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">
+                        workspace
+                      </label>
+                      <input
+                        type="text"
+                        value={agent.workspace}
+                        onChange={(e) =>
+                          handleAgentFieldChange(
+                            index,
+                            "workspace",
+                            e.target.value
+                          )
+                        }
+                        placeholder="可选工作目录"
+                        className="input-base text-sm"
+                      />
+                    </div>
+
+                    <div className="flex items-end justify-between gap-3">
+                      <label className="inline-flex items-center gap-2 text-sm text-gray-300 py-2">
+                        <input
+                          type="checkbox"
+                          checked={agent.default}
+                          onChange={(e) =>
+                            handleAgentFieldChange(
+                              index,
+                              "default",
+                              e.target.checked
+                            )
+                          }
+                          className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                        />
+                        default
+                      </label>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteAgent(index)}
+                        className="px-3 py-2.5 min-h-[40px] rounded-lg bg-red-900/30 hover:bg-red-800/40 text-red-300 text-sm transition-colors"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeCenterTab === "routing" && (
+        <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Link2 size={16} className="text-cyan-400" />
+              <h4 className="text-sm font-semibold text-white">
+                Binding 路由规则
+              </h4>
+            </div>
+            <button
+              type="button"
+              onClick={handleAddBinding}
+              className="px-3 py-2.5 min-h-[40px] rounded-lg bg-dark-500 hover:bg-dark-400 text-sm text-white transition-colors flex items-center gap-2"
+            >
+              <Plus size={16} />
+              新增规则
+            </button>
+          </div>
+
+          <p className="text-xs text-gray-500">
+            字段：channel、accountId、agentId。要求 channel + accountId 唯一，且
+            agentId 必须存在于 agents.list。
+          </p>
+
+          {visualBindings.length === 0 ? (
+            <div className="text-xs text-gray-500 p-3 rounded-lg bg-dark-700/60 border border-dashed border-dark-500">
+              暂无 Binding 路由规则，请先新增。
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {visualBindings.map((binding, index) => {
+                const channelSelectOptions =
+                  binding.channel && !channelOptions.includes(binding.channel)
+                    ? [binding.channel, ...channelOptions]
+                    : channelOptions;
+
+                const accountOptions = getAccountOptions(
+                  binding.channel,
+                  binding.accountId
+                );
+
+                const agentSelectOptions =
+                  binding.agentId && !agentIdOptions.includes(binding.agentId)
+                    ? [binding.agentId, ...agentIdOptions]
+                    : agentIdOptions;
+
+                return (
+                  <div
+                    key={`binding-${index}`}
+                    className="p-3 rounded-lg bg-dark-700/70 border border-dark-500"
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">
+                          channel
+                        </label>
+                        <select
+                          value={binding.channel}
+                          onChange={(e) =>
+                            handleBindingFieldChange(
+                              index,
+                              "channel",
+                              e.target.value
+                            )
+                          }
+                          className="input-base text-sm"
+                        >
+                          <option value="">请选择渠道</option>
+                          {channelSelectOptions.map((channelId) => (
+                            <option key={channelId} value={channelId}>
+                              {channelId}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">
+                          accountId
+                        </label>
+                        {accountOptions.length > 0 ? (
+                          <select
+                            value={binding.accountId}
+                            onChange={(e) =>
+                              handleBindingFieldChange(
+                                index,
+                                "accountId",
+                                e.target.value
+                              )
+                            }
+                            className="input-base text-sm"
+                          >
+                            <option value="">请选择账号</option>
+                            {accountOptions.map((accountId) => (
+                              <option key={accountId} value={accountId}>
+                                {accountId}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="text"
+                            value={binding.accountId}
+                            onChange={(e) =>
+                              handleBindingFieldChange(
+                                index,
+                                "accountId",
+                                e.target.value
+                              )
+                            }
+                            placeholder="手动输入 accountId"
+                            className="input-base text-sm"
+                          />
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">
+                          agentId
+                        </label>
+                        <select
+                          value={binding.agentId}
+                          onChange={(e) =>
+                            handleBindingFieldChange(
+                              index,
+                              "agentId",
+                              e.target.value
+                            )
+                          }
+                          className="input-base text-sm"
+                        >
+                          <option value="">请选择 Agent</option>
+                          {agentSelectOptions.map((agentId) => (
+                            <option key={agentId} value={agentId}>
+                              {agentId}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteBinding(index)}
+                        className="px-3 py-2.5 min-h-[40px] rounded-lg bg-red-900/30 hover:bg-red-800/40 text-red-300 text-sm transition-colors"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeCenterTab === "runtime" && (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+            <div className="flex items-center gap-2">
+              <Network size={16} className="text-indigo-300" />
+              <h4 className="text-sm font-semibold text-white">Gateway 配置</h4>
+            </div>
+
             <div>
               <label className="block text-sm text-gray-400 mb-2">
                 监听端口
@@ -1784,643 +2184,993 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
               {gatewayValidationHint ?? "Gateway 参数校验通过"}
             </div>
           </div>
-        </div>
 
-        {/* 身份配置 */}
-        <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-claw-500/20 flex items-center justify-center">
-              <User size={20} className="text-claw-400" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-white">身份配置</h3>
-              <p className="text-xs text-gray-500">设置 AI 助手的名称和称呼</p>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">
-                AI 助手名称
-              </label>
-              <input
-                type="text"
-                value={identity.botName}
-                onChange={(e) =>
-                  setIdentity({ ...identity, botName: e.target.value })
-                }
-                placeholder="Clawd"
-                className="input-base"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">
-                你的称呼
-              </label>
-              <input
-                type="text"
-                value={identity.userName}
-                onChange={(e) =>
-                  setIdentity({ ...identity, userName: e.target.value })
-                }
-                placeholder="主人"
-                className="input-base"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">时区</label>
-              <select
-                value={identity.timezone}
-                onChange={(e) =>
-                  setIdentity({ ...identity, timezone: e.target.value })
-                }
-                className="input-base"
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {RUNTIME_PLACEHOLDER_CARDS.map((card) => (
+              <div
+                key={card.key}
+                className="rounded-xl border border-dark-500 bg-dark-600 p-4"
               >
-                <option value="Asia/Shanghai">Asia/Shanghai (北京时间)</option>
-                <option value="Asia/Hong_Kong">
-                  Asia/Hong_Kong (香港时间)
-                </option>
-                <option value="Asia/Tokyo">Asia/Tokyo (东京时间)</option>
-                <option value="America/New_York">
-                  America/New_York (纽约时间)
-                </option>
-                <option value="America/Los_Angeles">
-                  America/Los_Angeles (洛杉矶时间)
-                </option>
-                <option value="Europe/London">Europe/London (伦敦时间)</option>
-                <option value="UTC">UTC</option>
-              </select>
-            </div>
+                <p className="text-sm font-medium text-white">{card.title}</p>
+                <p className="text-xs text-gray-500 mt-2">{card.description}</p>
+              </div>
+            ))}
           </div>
         </div>
+      )}
 
-        {/* 安全设置 */}
-        <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
-              <Shield size={20} className="text-amber-400" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-white">安全设置</h3>
-              <p className="text-xs text-gray-500">权限和访问控制</p>
-            </div>
+      {activeCenterTab === "advanced" && (
+        <div className="space-y-4">
+          <div className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+            JSON 专家模式：直接编辑 agents.list 与
+            bindings，切回其他页签会自动校验并同步回可视化。
           </div>
 
-          <div className="space-y-4">
-            <div className="flex items-center justify-between p-4 bg-dark-600 rounded-lg">
-              <div>
-                <p className="text-sm text-white">启用白名单</p>
-                <p className="text-xs text-gray-500">只允许白名单用户访问</p>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input type="checkbox" className="sr-only peer" />
-                <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-claw-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-claw-500"></div>
-              </label>
-            </div>
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">
+              agents.list (JSON)
+            </label>
+            <textarea
+              value={agentsListText}
+              onChange={(e) => setAgentsListText(e.target.value)}
+              rows={8}
+              className="input-base font-mono text-xs"
+            />
+          </div>
 
-            <div className="flex items-center justify-between p-4 bg-dark-600 rounded-lg">
-              <div>
-                <p className="text-sm text-white">文件访问权限</p>
-                <p className="text-xs text-gray-500">允许 AI 读写本地文件</p>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input type="checkbox" className="sr-only peer" />
-                <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-claw-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-claw-500"></div>
-              </label>
-            </div>
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">
+              bindings (JSON)
+            </label>
+            <textarea
+              value={bindingsText}
+              onChange={(e) => setBindingsText(e.target.value)}
+              rows={8}
+              className="input-base font-mono text-xs"
+            />
           </div>
         </div>
+      )}
 
-        {/* 高级设置 */}
-        <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-purple-500/20 flex items-center justify-center">
-              <FileCode size={20} className="text-purple-400" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-white">高级设置</h3>
-              <p className="text-xs text-gray-500">配置文件和目录</p>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            <button
-              onClick={openConfigDir}
-              className="w-full flex items-center gap-3 p-4 bg-dark-600 rounded-lg hover:bg-dark-500 transition-colors text-left"
-            >
-              <FolderOpen size={18} className="text-gray-400" />
-              <div className="flex-1">
-                <p className="text-sm text-white">打开配置目录</p>
-                <p className="text-xs text-gray-500">~/.openclaw</p>
-              </div>
-            </button>
-          </div>
+      <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-3">
+        <div className="text-xs text-gray-400">
+          新流程：先“生成预览”→查看差异/校验→“应用配置”（自动备份）→可“选择备份并回滚”。
         </div>
 
-        {/* Agent 与 Binding 配置 */}
-        <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-cyan-500/20 flex items-center justify-center">
-              <FileCode size={20} className="text-cyan-400" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-white">
-                Agent 与 Binding 配置
-              </h3>
-              <p className="text-xs text-gray-500">
-                默认使用可视化配置，可切换专家模式直接编辑 JSON
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div className="p-4 rounded-lg bg-dark-600 border border-dark-500 flex items-center justify-between gap-4">
-              <div>
-                <p className="text-sm text-white font-medium">
-                  专家模式（JSON）
-                </p>
-                <p className="text-xs text-gray-500">
-                  开启后可直接编辑 agents.list 与 bindings 原始 JSON
-                </p>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="sr-only peer"
-                  checked={expertMode}
-                  onChange={(e) => handleExpertModeToggle(e.target.checked)}
-                />
-                <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-              </label>
-            </div>
-
-            {!expertMode ? (
-              <div className="space-y-4">
-                <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Bot size={16} className="text-cyan-400" />
-                      <h4 className="text-sm font-semibold text-white">
-                        Agent 管理
-                      </h4>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleAddAgent}
-                      className="px-3 py-2.5 min-h-[40px] rounded-lg bg-dark-500 hover:bg-dark-400 text-sm text-white transition-colors flex items-center gap-2"
-                    >
-                      <Plus size={16} />
-                      新增 Agent
-                    </button>
-                  </div>
-
-                  <p className="text-xs text-gray-500">
-                    字段：id（必填且唯一）、name（可选）、workspace（可选）、default（可选）
-                  </p>
-
-                  {visualAgents.length === 0 ? (
-                    <div className="text-xs text-gray-500 p-3 rounded-lg bg-dark-700/60 border border-dashed border-dark-500">
-                      暂无 Agent，请先新增。
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {visualAgents.map((agent, index) => (
-                        <div
-                          key={`agent-${index}`}
-                          className="p-3 rounded-lg bg-dark-700/70 border border-dark-500 space-y-3"
-                        >
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            <div>
-                              <label className="block text-xs text-gray-400 mb-1">
-                                id *
-                              </label>
-                              <input
-                                type="text"
-                                value={agent.id}
-                                onChange={(e) =>
-                                  handleAgentFieldChange(
-                                    index,
-                                    "id",
-                                    e.target.value
-                                  )
-                                }
-                                placeholder="例如：assistant"
-                                className="input-base text-sm"
-                              />
-                            </div>
-
-                            <div>
-                              <label className="block text-xs text-gray-400 mb-1">
-                                name
-                              </label>
-                              <input
-                                type="text"
-                                value={agent.name}
-                                onChange={(e) =>
-                                  handleAgentFieldChange(
-                                    index,
-                                    "name",
-                                    e.target.value
-                                  )
-                                }
-                                placeholder="可选显示名称"
-                                className="input-base text-sm"
-                              />
-                            </div>
-
-                            <div>
-                              <label className="block text-xs text-gray-400 mb-1">
-                                workspace
-                              </label>
-                              <input
-                                type="text"
-                                value={agent.workspace}
-                                onChange={(e) =>
-                                  handleAgentFieldChange(
-                                    index,
-                                    "workspace",
-                                    e.target.value
-                                  )
-                                }
-                                placeholder="可选工作目录"
-                                className="input-base text-sm"
-                              />
-                            </div>
-
-                            <div className="flex items-end justify-between gap-3">
-                              <label className="inline-flex items-center gap-2 text-sm text-gray-300 py-2">
-                                <input
-                                  type="checkbox"
-                                  checked={agent.default}
-                                  onChange={(e) =>
-                                    handleAgentFieldChange(
-                                      index,
-                                      "default",
-                                      e.target.checked
-                                    )
-                                  }
-                                  className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
-                                />
-                                default
-                              </label>
-
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteAgent(index)}
-                                className="px-3 py-2.5 min-h-[40px] rounded-lg bg-red-900/30 hover:bg-red-800/40 text-red-300 text-sm transition-colors"
-                              >
-                                删除
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Link2 size={16} className="text-cyan-400" />
-                      <h4 className="text-sm font-semibold text-white">
-                        Binding 路由规则
-                      </h4>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleAddBinding}
-                      className="px-3 py-2.5 min-h-[40px] rounded-lg bg-dark-500 hover:bg-dark-400 text-sm text-white transition-colors flex items-center gap-2"
-                    >
-                      <Plus size={16} />
-                      新增规则
-                    </button>
-                  </div>
-
-                  <p className="text-xs text-gray-500">
-                    字段：channel、accountId、agentId。要求 channel + accountId
-                    唯一，且 agentId 必须存在于 agents.list。
-                  </p>
-
-                  {visualBindings.length === 0 ? (
-                    <div className="text-xs text-gray-500 p-3 rounded-lg bg-dark-700/60 border border-dashed border-dark-500">
-                      暂无 Binding 路由规则，请先新增。
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {visualBindings.map((binding, index) => {
-                        const channelSelectOptions =
-                          binding.channel &&
-                          !channelOptions.includes(binding.channel)
-                            ? [binding.channel, ...channelOptions]
-                            : channelOptions;
-
-                        const accountOptions = getAccountOptions(
-                          binding.channel,
-                          binding.accountId
-                        );
-
-                        const agentSelectOptions =
-                          binding.agentId &&
-                          !agentIdOptions.includes(binding.agentId)
-                            ? [binding.agentId, ...agentIdOptions]
-                            : agentIdOptions;
-
-                        return (
-                          <div
-                            key={`binding-${index}`}
-                            className="p-3 rounded-lg bg-dark-700/70 border border-dark-500"
-                          >
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
-                              <div>
-                                <label className="block text-xs text-gray-400 mb-1">
-                                  channel
-                                </label>
-                                <select
-                                  value={binding.channel}
-                                  onChange={(e) =>
-                                    handleBindingFieldChange(
-                                      index,
-                                      "channel",
-                                      e.target.value
-                                    )
-                                  }
-                                  className="input-base text-sm"
-                                >
-                                  <option value="">请选择渠道</option>
-                                  {channelSelectOptions.map((channelId) => (
-                                    <option key={channelId} value={channelId}>
-                                      {channelId}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-
-                              <div>
-                                <label className="block text-xs text-gray-400 mb-1">
-                                  accountId
-                                </label>
-                                {accountOptions.length > 0 ? (
-                                  <select
-                                    value={binding.accountId}
-                                    onChange={(e) =>
-                                      handleBindingFieldChange(
-                                        index,
-                                        "accountId",
-                                        e.target.value
-                                      )
-                                    }
-                                    className="input-base text-sm"
-                                  >
-                                    <option value="">请选择账号</option>
-                                    {accountOptions.map((accountId) => (
-                                      <option key={accountId} value={accountId}>
-                                        {accountId}
-                                      </option>
-                                    ))}
-                                  </select>
-                                ) : (
-                                  <input
-                                    type="text"
-                                    value={binding.accountId}
-                                    onChange={(e) =>
-                                      handleBindingFieldChange(
-                                        index,
-                                        "accountId",
-                                        e.target.value
-                                      )
-                                    }
-                                    placeholder="手动输入 accountId"
-                                    className="input-base text-sm"
-                                  />
-                                )}
-                              </div>
-
-                              <div>
-                                <label className="block text-xs text-gray-400 mb-1">
-                                  agentId
-                                </label>
-                                <select
-                                  value={binding.agentId}
-                                  onChange={(e) =>
-                                    handleBindingFieldChange(
-                                      index,
-                                      "agentId",
-                                      e.target.value
-                                    )
-                                  }
-                                  className="input-base text-sm"
-                                >
-                                  <option value="">请选择 Agent</option>
-                                  {agentSelectOptions.map((agentId) => (
-                                    <option key={agentId} value={agentId}>
-                                      {agentId}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteBinding(index)}
-                                className="px-3 py-2.5 min-h-[40px] rounded-lg bg-red-900/30 hover:bg-red-800/40 text-red-300 text-sm transition-colors"
-                              >
-                                删除
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <button
+            onClick={handlePreviewConfig}
+            disabled={previewLoading || applyLoading || rollbackLoading}
+            className="btn-secondary flex items-center justify-center gap-2"
+          >
+            {previewLoading ? (
+              <Loader2 size={16} className="animate-spin" />
             ) : (
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">
-                    agents.list (JSON)
-                  </label>
-                  <textarea
-                    value={agentsListText}
-                    onChange={(e) => setAgentsListText(e.target.value)}
-                    rows={8}
-                    className="input-base font-mono text-xs"
-                  />
-                </div>
+              <FileCode size={16} />
+            )}
+            生成预览
+          </button>
 
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">
-                    bindings (JSON)
-                  </label>
-                  <textarea
-                    value={bindingsText}
-                    onChange={(e) => setBindingsText(e.target.value)}
-                    rows={8}
-                    className="input-base font-mono text-xs"
-                  />
-                </div>
+          <button
+            type="button"
+            disabled={!previewResult}
+            onClick={() => {
+              if (!previewResult) return;
+              const summary = previewResult.diff_summary;
+              const sample = summary.changes
+                .slice(0, 10)
+                .map(
+                  (item) =>
+                    `[${item.kind}] ${item.path} | ${formatValuePreview(
+                      item.before
+                    )} -> ${formatValuePreview(item.after)}${
+                      item.masked ? " (masked)" : ""
+                    }`
+                )
+                .join("\n");
+              alert(
+                `变更摘要：新增 ${summary.added}，修改 ${
+                  summary.modified
+                }，删除 ${summary.removed}\n\n${sample || "无差异"}`
+              );
+            }}
+            className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            <Link2 size={16} />
+            查看变更摘要
+          </button>
+
+          <button
+            onClick={handleOpenRollbackDialog}
+            disabled={rollbackLoading || previewLoading || applyLoading}
+            className="btn-secondary flex items-center justify-center gap-2"
+          >
+            {rollbackLoading ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Trash2 size={16} />
+            )}
+            选择备份并回滚
+          </button>
+
+          <button
+            onClick={saveAgentAndBindingConfig}
+            disabled={!canApplyConfig}
+            title={applyDisabledReason ?? undefined}
+            className="btn-primary flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            {applyLoading ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Save size={16} />
+            )}
+            应用配置
+          </button>
+          {applyDisabledReason && (
+            <div className="text-xs text-gray-500 sm:col-span-2 text-center">
+              {applyDisabledReason}
+            </div>
+          )}
+        </div>
+
+        {previewResult && (
+          <div className="text-xs text-gray-400 space-y-2">
+            <div>
+              预览差异：新增 {previewResult.diff_summary.added}，修改{" "}
+              {previewResult.diff_summary.modified}，删除{" "}
+              {previewResult.diff_summary.removed}
+            </div>
+            <div>
+              预校验：
+              {previewResult.validation.valid
+                ? "通过"
+                : `失败（${previewResult.validation.issues.length} 项）`}
+            </div>
+            {!previewResult.validation.valid && (
+              <div className="text-amber-300">
+                校验失败详情已通过弹框提示，请先修复后再应用。
               </div>
             )}
-
-            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-3">
-              <div className="text-xs text-gray-400">
-                新流程：先“生成预览”→查看差异/校验→“应用配置”（自动备份）→可“选择备份并回滚”。
+            {previewResult.diff_summary.changes.length > 0 && (
+              <div className="max-h-44 overflow-auto rounded-lg border border-dark-500 p-2 bg-dark-700/60 space-y-1">
+                {previewResult.diff_summary.changes
+                  .slice(0, MAX_DIFF_DISPLAY)
+                  .map((item, idx) => (
+                    <div key={`${item.path}-${idx}`}>
+                      <span className="text-cyan-300">[{item.kind}]</span>{" "}
+                      <span className="text-gray-300">{item.path}</span>
+                      <span className="text-gray-500"> | </span>
+                      <span className="text-gray-400">
+                        {formatValuePreview(item.before)} →{" "}
+                        {formatValuePreview(item.after)}
+                      </span>
+                      {item.masked && (
+                        <span className="text-amber-300">
+                          （敏感字段已掩码）
+                        </span>
+                      )}
+                    </div>
+                  ))}
               </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <button
-                  onClick={handlePreviewConfig}
-                  disabled={previewLoading || applyLoading || rollbackLoading}
-                  className="btn-secondary flex items-center justify-center gap-2"
-                >
-                  {previewLoading ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <FileCode size={16} />
-                  )}
-                  生成预览
-                </button>
-
+  return (
+    <div className="module-page-shell">
+      <div className="max-w-2xl space-y-6">
+        {configCenterView === "center" ? (
+          configCenterPanel
+        ) : (
+          <>
+            <div className="bg-dark-700 rounded-2xl p-5 border border-dark-500">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                  <h3 className="text-base sm:text-lg font-semibold text-white">
+                    Agent & Runtime 配置中心
+                  </h3>
+                  <p className="text-xs text-gray-500 mt-1">
+                    进入二级视图统一管理 Agent / Routing / Runtime / 高级(JSON)
+                  </p>
+                </div>
                 <button
                   type="button"
-                  disabled={!previewResult}
-                  onClick={() => {
-                    if (!previewResult) return;
-                    const summary = previewResult.diff_summary;
-                    const sample = summary.changes
-                      .slice(0, 10)
-                      .map(
-                        (item) =>
-                          `[${item.kind}] ${item.path} | ${formatValuePreview(
-                            item.before
-                          )} -> ${formatValuePreview(item.after)}${
-                            item.masked ? " (masked)" : ""
-                          }`
-                      )
-                      .join("\n");
-                    alert(
-                      `变更摘要：新增 ${summary.added}，修改 ${
-                        summary.modified
-                      }，删除 ${summary.removed}\n\n${sample || "无差异"}`
-                    );
-                  }}
-                  className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
+                  onClick={handleOpenConfigCenter}
+                  className="btn-secondary inline-flex items-center justify-center gap-2 min-h-[40px]"
                 >
-                  <Link2 size={16} />
-                  查看变更摘要
+                  进入配置中心
+                  <ChevronRight size={16} />
                 </button>
+              </div>
+            </div>
 
-                <button
-                  onClick={handleOpenRollbackDialog}
-                  disabled={rollbackLoading || previewLoading || applyLoading}
-                  className="btn-secondary flex items-center justify-center gap-2"
-                >
-                  {rollbackLoading ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <Trash2 size={16} />
-                  )}
-                  选择备份并回滚
-                </button>
-
-                <button
-                  onClick={saveAgentAndBindingConfig}
-                  disabled={!canApplyConfig}
-                  title={applyDisabledReason ?? undefined}
-                  className="btn-primary flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {applyLoading ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <Save size={16} />
-                  )}
-                  应用配置
-                </button>
-                {applyDisabledReason && (
-                  <div className="text-xs text-gray-500 sm:col-span-2 text-center">
-                    {applyDisabledReason}
-                  </div>
-                )}
+            {/* Gateway 配置 */}
+            <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-indigo-500/20 flex items-center justify-center">
+                  <Network size={20} className="text-indigo-300" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">
+                    Gateway 配置
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    Web Server 顶部入口参数
+                  </p>
+                </div>
               </div>
 
-              {previewResult && (
-                <div className="text-xs text-gray-400 space-y-2">
-                  <div>
-                    预览差异：新增 {previewResult.diff_summary.added}，修改{" "}
-                    {previewResult.diff_summary.modified}，删除{" "}
-                    {previewResult.diff_summary.removed}
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">
+                    监听端口
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={65535}
+                    value={gatewayPortInput}
+                    onChange={(e) =>
+                      handleGatewayPortInputChange(e.target.value)
+                    }
+                    className="input-base"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">
+                    绑定地址
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <select
+                      value={gatewayBindPreset}
+                      onChange={(e) =>
+                        handleGatewayBindPresetChange(
+                          e.target.value as GatewayBindPreset
+                        )
+                      }
+                      className="input-base"
+                    >
+                      <option value="loopback">仅本机（127.0.0.1）</option>
+                      <option value="all">全部网卡（0.0.0.0）</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={gatewayConfig.bind}
+                      onChange={(e) =>
+                        handleGatewayBindInputChange(e.target.value)
+                      }
+                      disabled={gatewayBindPreset !== "custom"}
+                      className="input-base disabled:opacity-60"
+                    />
                   </div>
-                  <div>
-                    预校验：
-                    {previewResult.validation.valid
-                      ? "通过"
-                      : `失败（${previewResult.validation.issues.length} 项）`}
-                  </div>
-                  {!previewResult.validation.valid && (
-                    <div className="text-amber-300">
-                      校验失败详情已通过弹框提示，请先修复后再应用。
-                    </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">
+                    trustedProxies
+                  </label>
+                  <textarea
+                    value={gatewayTrustedProxyInput}
+                    onChange={(e) =>
+                      handleGatewayTrustedProxyInputChange(e.target.value)
+                    }
+                    rows={4}
+                    className="input-base font-mono text-xs"
+                    placeholder={"127.0.0.1/32\n10.0.0.0/8"}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    支持空格、换行、逗号、分号分隔。
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">
+                    重载模式
+                  </label>
+                  <select
+                    value={gatewayConfig.reloadMode}
+                    onChange={(e) =>
+                      handleGatewayReloadModeChange(
+                        e.target.value as GatewayReloadMode
+                      )
+                    }
+                    className="input-base"
+                  >
+                    {GATEWAY_RELOAD_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedGatewayReloadModeOption && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      {selectedGatewayReloadModeOption.description}
+                    </p>
                   )}
-                  {previewResult.diff_summary.changes.length > 0 && (
-                    <div className="max-h-44 overflow-auto rounded-lg border border-dark-500 p-2 bg-dark-700/60 space-y-1">
-                      {previewResult.diff_summary.changes
-                        .slice(0, MAX_DIFF_DISPLAY)
-                        .map((item, idx) => (
-                          <div key={`${item.path}-${idx}`}>
-                            <span className="text-cyan-300">[{item.kind}]</span>{" "}
-                            <span className="text-gray-300">{item.path}</span>
-                            <span className="text-gray-500"> | </span>
-                            <span className="text-gray-400">
-                              {formatValuePreview(item.before)} →{" "}
-                              {formatValuePreview(item.after)}
-                            </span>
-                            {item.masked && (
-                              <span className="text-amber-300">
-                                （敏感字段已掩码）
-                              </span>
-                            )}
-                          </div>
-                        ))}
+                </div>
+
+                <div
+                  className={`text-xs ${
+                    gatewayValidationHint
+                      ? "text-amber-300"
+                      : "text-emerald-300"
+                  }`}
+                >
+                  {gatewayValidationHint ?? "Gateway 参数校验通过"}
+                </div>
+              </div>
+            </div>
+
+            {/* 身份配置 */}
+            <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-claw-500/20 flex items-center justify-center">
+                  <User size={20} className="text-claw-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">身份配置</h3>
+                  <p className="text-xs text-gray-500">
+                    设置 AI 助手的名称和称呼
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">
+                    AI 助手名称
+                  </label>
+                  <input
+                    type="text"
+                    value={identity.botName}
+                    onChange={(e) =>
+                      setIdentity({ ...identity, botName: e.target.value })
+                    }
+                    placeholder="Clawd"
+                    className="input-base"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">
+                    你的称呼
+                  </label>
+                  <input
+                    type="text"
+                    value={identity.userName}
+                    onChange={(e) =>
+                      setIdentity({ ...identity, userName: e.target.value })
+                    }
+                    placeholder="主人"
+                    className="input-base"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">
+                    时区
+                  </label>
+                  <select
+                    value={identity.timezone}
+                    onChange={(e) =>
+                      setIdentity({ ...identity, timezone: e.target.value })
+                    }
+                    className="input-base"
+                  >
+                    <option value="Asia/Shanghai">
+                      Asia/Shanghai (北京时间)
+                    </option>
+                    <option value="Asia/Hong_Kong">
+                      Asia/Hong_Kong (香港时间)
+                    </option>
+                    <option value="Asia/Tokyo">Asia/Tokyo (东京时间)</option>
+                    <option value="America/New_York">
+                      America/New_York (纽约时间)
+                    </option>
+                    <option value="America/Los_Angeles">
+                      America/Los_Angeles (洛杉矶时间)
+                    </option>
+                    <option value="Europe/London">
+                      Europe/London (伦敦时间)
+                    </option>
+                    <option value="UTC">UTC</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* 安全设置 */}
+            <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
+                  <Shield size={20} className="text-amber-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">安全设置</h3>
+                  <p className="text-xs text-gray-500">权限和访问控制</p>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex items-center justify-between p-4 bg-dark-600 rounded-lg">
+                  <div>
+                    <p className="text-sm text-white">启用白名单</p>
+                    <p className="text-xs text-gray-500">
+                      只允许白名单用户访问
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" className="sr-only peer" />
+                    <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-claw-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-claw-500"></div>
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between p-4 bg-dark-600 rounded-lg">
+                  <div>
+                    <p className="text-sm text-white">文件访问权限</p>
+                    <p className="text-xs text-gray-500">
+                      允许 AI 读写本地文件
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" className="sr-only peer" />
+                    <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-claw-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-claw-500"></div>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            {/* 高级设置 */}
+            <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-purple-500/20 flex items-center justify-center">
+                  <FileCode size={20} className="text-purple-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">高级设置</h3>
+                  <p className="text-xs text-gray-500">配置文件和目录</p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <button
+                  onClick={openConfigDir}
+                  className="w-full flex items-center gap-3 p-4 bg-dark-600 rounded-lg hover:bg-dark-500 transition-colors text-left"
+                >
+                  <FolderOpen size={18} className="text-gray-400" />
+                  <div className="flex-1">
+                    <p className="text-sm text-white">打开配置目录</p>
+                    <p className="text-xs text-gray-500">~/.openclaw</p>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {/* Agent 与 Binding 配置 */}
+            <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-cyan-500/20 flex items-center justify-center">
+                  <FileCode size={20} className="text-cyan-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">
+                    Agent 与 Binding 配置
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    默认使用可视化配置，可切换专家模式直接编辑 JSON
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="p-4 rounded-lg bg-dark-600 border border-dark-500 flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm text-white font-medium">
+                      专家模式（JSON）
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      开启后可直接编辑 agents.list 与 bindings 原始 JSON
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={expertMode}
+                      onChange={(e) => handleExpertModeToggle(e.target.checked)}
+                    />
+                    <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                  </label>
+                </div>
+
+                {!expertMode ? (
+                  <div className="space-y-4">
+                    <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <Bot size={16} className="text-cyan-400" />
+                          <h4 className="text-sm font-semibold text-white">
+                            Agent 管理
+                          </h4>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleAddAgent}
+                          className="px-3 py-2.5 min-h-[40px] rounded-lg bg-dark-500 hover:bg-dark-400 text-sm text-white transition-colors flex items-center gap-2"
+                        >
+                          <Plus size={16} />
+                          新增 Agent
+                        </button>
+                      </div>
+
+                      <p className="text-xs text-gray-500">
+                        字段：id（必填且唯一）、name（可选）、workspace（可选）、default（可选）
+                      </p>
+
+                      {visualAgents.length === 0 ? (
+                        <div className="text-xs text-gray-500 p-3 rounded-lg bg-dark-700/60 border border-dashed border-dark-500">
+                          暂无 Agent，请先新增。
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {visualAgents.map((agent, index) => (
+                            <div
+                              key={`agent-${index}`}
+                              className="p-3 rounded-lg bg-dark-700/70 border border-dark-500 space-y-3"
+                            >
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                  <label className="block text-xs text-gray-400 mb-1">
+                                    id *
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={agent.id}
+                                    onChange={(e) =>
+                                      handleAgentFieldChange(
+                                        index,
+                                        "id",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="例如：assistant"
+                                    className="input-base text-sm"
+                                  />
+                                </div>
+
+                                <div>
+                                  <label className="block text-xs text-gray-400 mb-1">
+                                    name
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={agent.name}
+                                    onChange={(e) =>
+                                      handleAgentFieldChange(
+                                        index,
+                                        "name",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="可选显示名称"
+                                    className="input-base text-sm"
+                                  />
+                                </div>
+
+                                <div>
+                                  <label className="block text-xs text-gray-400 mb-1">
+                                    workspace
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={agent.workspace}
+                                    onChange={(e) =>
+                                      handleAgentFieldChange(
+                                        index,
+                                        "workspace",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="可选工作目录"
+                                    className="input-base text-sm"
+                                  />
+                                </div>
+
+                                <div className="flex items-end justify-between gap-3">
+                                  <label className="inline-flex items-center gap-2 text-sm text-gray-300 py-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={agent.default}
+                                      onChange={(e) =>
+                                        handleAgentFieldChange(
+                                          index,
+                                          "default",
+                                          e.target.checked
+                                        )
+                                      }
+                                      className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                                    />
+                                    default
+                                  </label>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteAgent(index)}
+                                    className="px-3 py-2.5 min-h-[40px] rounded-lg bg-red-900/30 hover:bg-red-800/40 text-red-300 text-sm transition-colors"
+                                  >
+                                    删除
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <Link2 size={16} className="text-cyan-400" />
+                          <h4 className="text-sm font-semibold text-white">
+                            Binding 路由规则
+                          </h4>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleAddBinding}
+                          className="px-3 py-2.5 min-h-[40px] rounded-lg bg-dark-500 hover:bg-dark-400 text-sm text-white transition-colors flex items-center gap-2"
+                        >
+                          <Plus size={16} />
+                          新增规则
+                        </button>
+                      </div>
+
+                      <p className="text-xs text-gray-500">
+                        字段：channel、accountId、agentId。要求 channel +
+                        accountId 唯一，且 agentId 必须存在于 agents.list。
+                      </p>
+
+                      {visualBindings.length === 0 ? (
+                        <div className="text-xs text-gray-500 p-3 rounded-lg bg-dark-700/60 border border-dashed border-dark-500">
+                          暂无 Binding 路由规则，请先新增。
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {visualBindings.map((binding, index) => {
+                            const channelSelectOptions =
+                              binding.channel &&
+                              !channelOptions.includes(binding.channel)
+                                ? [binding.channel, ...channelOptions]
+                                : channelOptions;
+
+                            const accountOptions = getAccountOptions(
+                              binding.channel,
+                              binding.accountId
+                            );
+
+                            const agentSelectOptions =
+                              binding.agentId &&
+                              !agentIdOptions.includes(binding.agentId)
+                                ? [binding.agentId, ...agentIdOptions]
+                                : agentIdOptions;
+
+                            return (
+                              <div
+                                key={`binding-${index}`}
+                                className="p-3 rounded-lg bg-dark-700/70 border border-dark-500"
+                              >
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+                                  <div>
+                                    <label className="block text-xs text-gray-400 mb-1">
+                                      channel
+                                    </label>
+                                    <select
+                                      value={binding.channel}
+                                      onChange={(e) =>
+                                        handleBindingFieldChange(
+                                          index,
+                                          "channel",
+                                          e.target.value
+                                        )
+                                      }
+                                      className="input-base text-sm"
+                                    >
+                                      <option value="">请选择渠道</option>
+                                      {channelSelectOptions.map((channelId) => (
+                                        <option
+                                          key={channelId}
+                                          value={channelId}
+                                        >
+                                          {channelId}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+
+                                  <div>
+                                    <label className="block text-xs text-gray-400 mb-1">
+                                      accountId
+                                    </label>
+                                    {accountOptions.length > 0 ? (
+                                      <select
+                                        value={binding.accountId}
+                                        onChange={(e) =>
+                                          handleBindingFieldChange(
+                                            index,
+                                            "accountId",
+                                            e.target.value
+                                          )
+                                        }
+                                        className="input-base text-sm"
+                                      >
+                                        <option value="">请选择账号</option>
+                                        {accountOptions.map((accountId) => (
+                                          <option
+                                            key={accountId}
+                                            value={accountId}
+                                          >
+                                            {accountId}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    ) : (
+                                      <input
+                                        type="text"
+                                        value={binding.accountId}
+                                        onChange={(e) =>
+                                          handleBindingFieldChange(
+                                            index,
+                                            "accountId",
+                                            e.target.value
+                                          )
+                                        }
+                                        placeholder="手动输入 accountId"
+                                        className="input-base text-sm"
+                                      />
+                                    )}
+                                  </div>
+
+                                  <div>
+                                    <label className="block text-xs text-gray-400 mb-1">
+                                      agentId
+                                    </label>
+                                    <select
+                                      value={binding.agentId}
+                                      onChange={(e) =>
+                                        handleBindingFieldChange(
+                                          index,
+                                          "agentId",
+                                          e.target.value
+                                        )
+                                      }
+                                      className="input-base text-sm"
+                                    >
+                                      <option value="">请选择 Agent</option>
+                                      {agentSelectOptions.map((agentId) => (
+                                        <option key={agentId} value={agentId}>
+                                          {agentId}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteBinding(index)}
+                                    className="px-3 py-2.5 min-h-[40px] rounded-lg bg-red-900/30 hover:bg-red-800/40 text-red-300 text-sm transition-colors"
+                                  >
+                                    删除
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-2">
+                        agents.list (JSON)
+                      </label>
+                      <textarea
+                        value={agentsListText}
+                        onChange={(e) => setAgentsListText(e.target.value)}
+                        rows={8}
+                        className="input-base font-mono text-xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-2">
+                        bindings (JSON)
+                      </label>
+                      <textarea
+                        value={bindingsText}
+                        onChange={(e) => setBindingsText(e.target.value)}
+                        rows={8}
+                        className="input-base font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-3">
+                  <div className="text-xs text-gray-400">
+                    新流程：先“生成预览”→查看差异/校验→“应用配置”（自动备份）→可“选择备份并回滚”。
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      onClick={handlePreviewConfig}
+                      disabled={
+                        previewLoading || applyLoading || rollbackLoading
+                      }
+                      className="btn-secondary flex items-center justify-center gap-2"
+                    >
+                      {previewLoading ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <FileCode size={16} />
+                      )}
+                      生成预览
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={!previewResult}
+                      onClick={() => {
+                        if (!previewResult) return;
+                        const summary = previewResult.diff_summary;
+                        const sample = summary.changes
+                          .slice(0, 10)
+                          .map(
+                            (item) =>
+                              `[${item.kind}] ${
+                                item.path
+                              } | ${formatValuePreview(
+                                item.before
+                              )} -> ${formatValuePreview(item.after)}${
+                                item.masked ? " (masked)" : ""
+                              }`
+                          )
+                          .join("\n");
+                        alert(
+                          `变更摘要：新增 ${summary.added}，修改 ${
+                            summary.modified
+                          }，删除 ${summary.removed}\n\n${sample || "无差异"}`
+                        );
+                      }}
+                      className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      <Link2 size={16} />
+                      查看变更摘要
+                    </button>
+
+                    <button
+                      onClick={handleOpenRollbackDialog}
+                      disabled={
+                        rollbackLoading || previewLoading || applyLoading
+                      }
+                      className="btn-secondary flex items-center justify-center gap-2"
+                    >
+                      {rollbackLoading ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <Trash2 size={16} />
+                      )}
+                      选择备份并回滚
+                    </button>
+
+                    <button
+                      onClick={saveAgentAndBindingConfig}
+                      disabled={!canApplyConfig}
+                      title={applyDisabledReason ?? undefined}
+                      className="btn-primary flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      {applyLoading ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <Save size={16} />
+                      )}
+                      应用配置
+                    </button>
+                    {applyDisabledReason && (
+                      <div className="text-xs text-gray-500 sm:col-span-2 text-center">
+                        {applyDisabledReason}
+                      </div>
+                    )}
+                  </div>
+
+                  {previewResult && (
+                    <div className="text-xs text-gray-400 space-y-2">
+                      <div>
+                        预览差异：新增 {previewResult.diff_summary.added}，修改{" "}
+                        {previewResult.diff_summary.modified}，删除{" "}
+                        {previewResult.diff_summary.removed}
+                      </div>
+                      <div>
+                        预校验：
+                        {previewResult.validation.valid
+                          ? "通过"
+                          : `失败（${previewResult.validation.issues.length} 项）`}
+                      </div>
+                      {!previewResult.validation.valid && (
+                        <div className="text-amber-300">
+                          校验失败详情已通过弹框提示，请先修复后再应用。
+                        </div>
+                      )}
+                      {previewResult.diff_summary.changes.length > 0 && (
+                        <div className="max-h-44 overflow-auto rounded-lg border border-dark-500 p-2 bg-dark-700/60 space-y-1">
+                          {previewResult.diff_summary.changes
+                            .slice(0, MAX_DIFF_DISPLAY)
+                            .map((item, idx) => (
+                              <div key={`${item.path}-${idx}`}>
+                                <span className="text-cyan-300">
+                                  [{item.kind}]
+                                </span>{" "}
+                                <span className="text-gray-300">
+                                  {item.path}
+                                </span>
+                                <span className="text-gray-500"> | </span>
+                                <span className="text-gray-400">
+                                  {formatValuePreview(item.before)} →{" "}
+                                  {formatValuePreview(item.after)}
+                                </span>
+                                {item.masked && (
+                                  <span className="text-amber-300">
+                                    （敏感字段已掩码）
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* 危险操作 */}
-        <div className="bg-dark-700 rounded-2xl p-6 border border-red-900/30">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center">
-              <AlertTriangle size={20} className="text-red-400" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-white">危险操作</h3>
-              <p className="text-xs text-gray-500">
-                以下操作不可撤销，请谨慎操作
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            <button
-              onClick={() => setShowUninstallConfirm(true)}
-              className="w-full flex items-center gap-3 p-4 bg-red-950/30 rounded-lg hover:bg-red-900/40 transition-colors text-left border border-red-900/30"
-            >
-              <Trash2 size={18} className="text-red-400" />
-              <div className="flex-1">
-                <p className="text-sm text-red-300">卸载 OpenClaw</p>
-                <p className="text-xs text-red-400/70">
-                  从系统中移除 OpenClaw CLI 工具
-                </p>
               </div>
-            </button>
-          </div>
-        </div>
+            </div>
+
+            {/* 危险操作 */}
+            <div className="bg-dark-700 rounded-2xl p-6 border border-red-900/30">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center">
+                  <AlertTriangle size={20} className="text-red-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">危险操作</h3>
+                  <p className="text-xs text-gray-500">
+                    以下操作不可撤销，请谨慎操作
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <button
+                  onClick={() => setShowUninstallConfirm(true)}
+                  className="w-full flex items-center gap-3 p-4 bg-red-950/30 rounded-lg hover:bg-red-900/40 transition-colors text-left border border-red-900/30"
+                >
+                  <Trash2 size={18} className="text-red-400" />
+                  <div className="flex-1">
+                    <p className="text-sm text-red-300">卸载 OpenClaw</p>
+                    <p className="text-xs text-red-400/70">
+                      从系统中移除 OpenClaw CLI 工具
+                    </p>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </>
+        )}
 
         {/* 成功提示弹框 */}
         {showConfigSuccessModal && configSuccessMessage && (
