@@ -114,12 +114,29 @@ interface VisualBinding {
 
 type GatewayBindPreset = "loopback" | "all" | "custom";
 type GatewayReloadMode = "hybrid" | "hot" | "restart" | "off";
+type CommandsNativeMode = "auto" | "true" | "false";
 
 interface ManagedGatewayConfig {
   port: number;
   bind: string;
   trustedProxies: string[];
   reloadMode: GatewayReloadMode;
+}
+
+interface ManagedCommandsConfig {
+  native?: CommandsNativeMode;
+  text?: boolean;
+  bash?: boolean;
+  config?: boolean;
+  debug?: boolean;
+  restart?: boolean;
+  useAccessGroups?: boolean;
+  allowFromAll?: string[];
+}
+
+interface ManagedMessagesConfig {
+  groupChatHistoryLimitEnabled: boolean;
+  groupChatHistoryLimit: number;
 }
 
 type ConfigCenterView = "general" | "center";
@@ -138,24 +155,14 @@ const RUNTIME_PLACEHOLDER_CARDS: Array<{
   description: string;
 }> = [
   {
-    key: "commands",
-    title: "Commands",
-    description: "命令执行链路与隔离策略（占位，Phase 2 接入）",
-  },
-  {
-    key: "messages",
-    title: "Messages",
-    description: "消息协议与队列策略（占位，Phase 2 接入）",
-  },
-  {
     key: "web",
     title: "Web",
-    description: "Web 访问入口策略（占位，Phase 2 接入）",
+    description: "Web 访问入口策略（预留，Phase 2B 接入）",
   },
   {
     key: "tools",
     title: "Tools",
-    description: "工具调用白名单与限流（占位，Phase 2 接入）",
+    description: "工具调用白名单与限流（预留，Phase 2B 接入）",
   },
 ];
 
@@ -166,6 +173,10 @@ const DEFAULT_GATEWAY_CONFIG: ManagedGatewayConfig = {
   bind: "127.0.0.1",
   trustedProxies: ["127.0.0.1/32"],
   reloadMode: "hybrid",
+};
+const DEFAULT_MESSAGES_CONFIG: ManagedMessagesConfig = {
+  groupChatHistoryLimitEnabled: false,
+  groupChatHistoryLimit: 0,
 };
 
 const GATEWAY_RELOAD_MODE_OPTIONS: Array<{
@@ -695,6 +706,123 @@ function parseGatewayConfig(config: unknown): ManagedGatewayConfig {
   };
 }
 
+function parseCommandsNativeMode(
+  value: unknown
+): CommandsNativeMode | undefined {
+  if (value === "auto" || value === "true" || value === "false") {
+    return value;
+  }
+  if (value === true) {
+    return "true";
+  }
+  if (value === false) {
+    return "false";
+  }
+  return undefined;
+}
+
+function parseOptionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeAllowFromList(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    return Array.from(
+      new Set(
+        value
+          .map((item) => (typeof item === "string" ? item.trim() : ""))
+          .filter((item) => Boolean(item))
+      )
+    );
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  return undefined;
+}
+
+function parseCommandsConfig(config: unknown): ManagedCommandsConfig {
+  if (!isRecord(config) || !isRecord(config.commands)) {
+    return {};
+  }
+
+  const commands = config.commands;
+  const allowFrom = isRecord(commands.allowFrom)
+    ? commands.allowFrom
+    : undefined;
+
+  return {
+    native: parseCommandsNativeMode(commands.native),
+    text: parseOptionalBoolean(commands.text),
+    bash: parseOptionalBoolean(commands.bash),
+    config: parseOptionalBoolean(commands.config),
+    debug: parseOptionalBoolean(commands.debug),
+    restart: parseOptionalBoolean(commands.restart),
+    useAccessGroups: parseOptionalBoolean(commands.useAccessGroups),
+    allowFromAll: allowFrom
+      ? normalizeAllowFromList(allowFrom["*"])
+      : undefined,
+  };
+}
+
+function normalizeManagedCommands(
+  commands: ManagedCommandsConfig
+): ManagedCommandsConfig {
+  return {
+    native: commands.native,
+    text: commands.text,
+    bash: commands.bash,
+    config: commands.config,
+    debug: commands.debug,
+    restart: commands.restart,
+    useAccessGroups: commands.useAccessGroups,
+    allowFromAll: normalizeAllowFromList(commands.allowFromAll),
+  };
+}
+
+function parseMessagesConfig(config: unknown): ManagedMessagesConfig {
+  if (!isRecord(config) || !isRecord(config.messages)) {
+    return { ...DEFAULT_MESSAGES_CONFIG };
+  }
+
+  const messages = config.messages;
+  const groupChat = isRecord(messages.groupChat)
+    ? messages.groupChat
+    : undefined;
+  const rawHistoryLimit = groupChat?.historyLimit;
+  const parsedLimit =
+    typeof rawHistoryLimit === "number" &&
+    Number.isInteger(rawHistoryLimit) &&
+    rawHistoryLimit >= 0
+      ? rawHistoryLimit
+      : DEFAULT_MESSAGES_CONFIG.groupChatHistoryLimit;
+
+  return {
+    groupChatHistoryLimitEnabled:
+      typeof rawHistoryLimit === "number" &&
+      Number.isInteger(rawHistoryLimit) &&
+      rawHistoryLimit >= 0,
+    groupChatHistoryLimit: parsedLimit,
+  };
+}
+
+function normalizeManagedMessages(
+  messages: ManagedMessagesConfig
+): ManagedMessagesConfig {
+  const normalizedLimit = Number.isFinite(messages.groupChatHistoryLimit)
+    ? Math.max(0, Math.trunc(messages.groupChatHistoryLimit))
+    : messages.groupChatHistoryLimit;
+
+  return {
+    groupChatHistoryLimitEnabled: messages.groupChatHistoryLimitEnabled,
+    groupChatHistoryLimit: normalizedLimit,
+  };
+}
+
 function normalizeManagedGateway(
   gateway: ManagedGatewayConfig
 ): ManagedGatewayConfig {
@@ -712,28 +840,93 @@ function normalizeManagedGateway(
   };
 }
 
+function buildCommandsPayload(
+  commands: ManagedCommandsConfig
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+
+  if (commands.native !== undefined) {
+    payload.native = commands.native;
+  }
+  if (commands.text !== undefined) {
+    payload.text = commands.text;
+  }
+  if (commands.bash !== undefined) {
+    payload.bash = commands.bash;
+  }
+  if (commands.config !== undefined) {
+    payload.config = commands.config;
+  }
+  if (commands.debug !== undefined) {
+    payload.debug = commands.debug;
+  }
+  if (commands.restart !== undefined) {
+    payload.restart = commands.restart;
+  }
+  if (commands.useAccessGroups !== undefined) {
+    payload.useAccessGroups = commands.useAccessGroups;
+  }
+
+  const allowFromAll = normalizeAllowFromList(commands.allowFromAll);
+  if (allowFromAll !== undefined) {
+    payload.allowFrom = {
+      "*": allowFromAll,
+    };
+  }
+
+  return payload;
+}
+
+function buildMessagesPayload(
+  messages: ManagedMessagesConfig
+): Record<string, unknown> {
+  if (!messages.groupChatHistoryLimitEnabled) {
+    return {};
+  }
+
+  return {
+    groupChat: {
+      historyLimit: Math.max(0, Math.trunc(messages.groupChatHistoryLimit)),
+    },
+  };
+}
+
 function normalizeVisualConfig(
   agents: VisualAgent[],
   bindings: VisualBinding[],
-  gateway: ManagedGatewayConfig
+  gateway: ManagedGatewayConfig,
+  commands: ManagedCommandsConfig,
+  messages: ManagedMessagesConfig
 ): {
   agents: VisualAgent[];
   bindings: VisualBinding[];
   gateway: ManagedGatewayConfig;
+  commands: ManagedCommandsConfig;
+  messages: ManagedMessagesConfig;
 } {
   return {
     agents: normalizeVisualAgents(agents),
     bindings: normalizeVisualBindings(bindings),
     gateway: normalizeManagedGateway(gateway),
+    commands: normalizeManagedCommands(commands),
+    messages: normalizeManagedMessages(messages),
   };
 }
 
 function buildManagedConfigSignature(
   agents: VisualAgent[],
   bindings: VisualBinding[],
-  gateway: ManagedGatewayConfig
+  gateway: ManagedGatewayConfig,
+  commands: ManagedCommandsConfig,
+  messages: ManagedMessagesConfig
 ): string {
-  const normalized = normalizeVisualConfig(agents, bindings, gateway);
+  const normalized = normalizeVisualConfig(
+    agents,
+    bindings,
+    gateway,
+    commands,
+    messages
+  );
   const agentsPayload = buildAgentsPayload(normalized.agents);
   const bindingsMap = bindingsRulesToMap(normalized.bindings);
 
@@ -749,6 +942,8 @@ function buildManagedConfigSignature(
           mode: normalized.gateway.reloadMode,
         },
       },
+      commands: buildCommandsPayload(normalized.commands),
+      messages: buildMessagesPayload(normalized.messages),
     })
   );
 }
@@ -756,7 +951,9 @@ function buildManagedConfigSignature(
 function validateVisualConfig(
   agents: VisualAgent[],
   bindings: VisualBinding[],
-  gateway: ManagedGatewayConfig
+  gateway: ManagedGatewayConfig,
+  commands: ManagedCommandsConfig,
+  messages: ManagedMessagesConfig
 ): string | null {
   const idSet = new Set<string>();
   for (let i = 0; i < agents.length; i += 1) {
@@ -821,6 +1018,28 @@ function validateVisualConfig(
     }
   }
 
+  if (
+    commands.native !== undefined &&
+    commands.native !== "auto" &&
+    commands.native !== "true" &&
+    commands.native !== "false"
+  ) {
+    return "Commands native 无效：仅支持 auto / true / false";
+  }
+
+  const allowFromAll = normalizeAllowFromList(commands.allowFromAll);
+  if (allowFromAll && allowFromAll.some((subject) => !subject.trim())) {
+    return "Commands allowFrom[*] 包含空主体，请逐行填写有效主体";
+  }
+
+  if (
+    messages.groupChatHistoryLimitEnabled &&
+    (!Number.isInteger(messages.groupChatHistoryLimit) ||
+      messages.groupChatHistoryLimit < 0)
+  ) {
+    return "Messages groupChat.historyLimit 无效：必须为 >= 0 的整数";
+  }
+
   return null;
 }
 
@@ -845,6 +1064,16 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const [gatewayTrustedProxyInput, setGatewayTrustedProxyInput] = useState("");
   const [gatewayBindPreset, setGatewayBindPreset] = useState<GatewayBindPreset>(
     detectGatewayBindPreset(DEFAULT_GATEWAY_CONFIG.bind)
+  );
+  const [commandsConfig, setCommandsConfig] = useState<ManagedCommandsConfig>(
+    {}
+  );
+  const [commandAllowFromInput, setCommandAllowFromInput] = useState("");
+  const [messagesConfig, setMessagesConfig] = useState<ManagedMessagesConfig>(
+    DEFAULT_MESSAGES_CONFIG
+  );
+  const [messagesHistoryLimitInput, setMessagesHistoryLimitInput] = useState(
+    String(DEFAULT_MESSAGES_CONFIG.groupChatHistoryLimit)
   );
 
   const [agentsListText, setAgentsListText] = useState("[]");
@@ -882,7 +1111,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       return buildManagedConfigSignature(
         visualAgents,
         visualBindings,
-        gatewayConfig
+        gatewayConfig,
+        commandsConfig,
+        messagesConfig
       );
     }
 
@@ -901,7 +1132,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       return buildManagedConfigSignature(
         parseAgentsList(parsedAgentsList),
         bindingsMapToRules(parseBindings(parsedBindings)),
-        gatewayConfig
+        gatewayConfig,
+        commandsConfig,
+        messagesConfig
       );
     } catch {
       return "__invalid_json__";
@@ -911,6 +1144,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     visualAgents,
     visualBindings,
     gatewayConfig,
+    commandsConfig,
+    messagesConfig,
     agentsListText,
     bindingsText,
   ]);
@@ -928,20 +1163,6 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     }
     return hasDiffSummaryChanges(previewResult.diff_summary);
   }, [previewResult]);
-
-  const canApplyConfig =
-    hasPendingChanges &&
-    previewHasChanges &&
-    !applyLoading &&
-    !previewLoading &&
-    !rollbackLoading &&
-    (previewResult === null || previewResult.validation.valid);
-
-  const applyDisabledReason = !hasPendingChanges
-    ? "无配置变更"
-    : !previewHasChanges
-    ? "无配置变更"
-    : null;
 
   const channelOptions = useMemo(() => {
     return Array.from(new Set(channelsConfig.map((channel) => channel.id)));
@@ -992,6 +1213,36 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     return null;
   }, [gatewayConfig.bind, gatewayConfig.trustedProxies, gatewayPortInput]);
 
+  const messagesHistoryLimitHint = useMemo(() => {
+    if (!messagesConfig.groupChatHistoryLimitEnabled) {
+      return null;
+    }
+
+    const parsed = Number(messagesHistoryLimitInput);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return "Messages historyLimit 必须为 >= 0 的整数";
+    }
+
+    return null;
+  }, [messagesConfig.groupChatHistoryLimitEnabled, messagesHistoryLimitInput]);
+
+  const canApplyConfig =
+    hasPendingChanges &&
+    previewHasChanges &&
+    !applyLoading &&
+    !previewLoading &&
+    !rollbackLoading &&
+    !messagesHistoryLimitHint &&
+    (previewResult === null || previewResult.validation.valid);
+
+  const applyDisabledReason = !hasPendingChanges
+    ? "无配置变更"
+    : !previewHasChanges
+    ? "无配置变更"
+    : messagesHistoryLimitHint
+    ? messagesHistoryLimitHint
+    : null;
+
   const syncJsonTextFromVisual = (
     nextAgents: VisualAgent[],
     nextBindings: VisualBinding[],
@@ -1008,9 +1259,57 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const buildGlobalInputConfigPayload = async (
     agentsList: Record<string, unknown>[],
     bindingsPayload: BindingsPayload,
-    managedGateway: ManagedGatewayConfig
+    managedGateway: ManagedGatewayConfig,
+    managedCommands: ManagedCommandsConfig,
+    managedMessages: ManagedMessagesConfig
   ) => {
     const fullConfig = await invoke<Record<string, unknown>>("get_config");
+    const existingCommands = isRecord(fullConfig.commands)
+      ? (fullConfig.commands as Record<string, unknown>)
+      : {};
+    const existingMessages = isRecord(fullConfig.messages)
+      ? (fullConfig.messages as Record<string, unknown>)
+      : {};
+    const commandsPayload = buildCommandsPayload(managedCommands);
+    const mergedCommands: Record<string, unknown> = {
+      ...existingCommands,
+      ...commandsPayload,
+    };
+    if ("allowFrom" in commandsPayload) {
+      const existingAllowFrom = isRecord(existingCommands.allowFrom)
+        ? (existingCommands.allowFrom as Record<string, unknown>)
+        : {};
+      const payloadAllowFrom = isRecord(commandsPayload.allowFrom)
+        ? (commandsPayload.allowFrom as Record<string, unknown>)
+        : {};
+      mergedCommands.allowFrom = {
+        ...existingAllowFrom,
+        ...payloadAllowFrom,
+      };
+    }
+
+    const groupChatSource = isRecord(existingMessages.groupChat)
+      ? (existingMessages.groupChat as Record<string, unknown>)
+      : {};
+    const mergedMessages: Record<string, unknown> = {
+      ...existingMessages,
+      groupChat: {
+        ...groupChatSource,
+      },
+    };
+    if (managedMessages.groupChatHistoryLimitEnabled) {
+      (mergedMessages.groupChat as Record<string, unknown>).historyLimit =
+        Math.max(0, Math.trunc(managedMessages.groupChatHistoryLimit));
+    } else {
+      delete (mergedMessages.groupChat as Record<string, unknown>).historyLimit;
+      if (
+        Object.keys(mergedMessages.groupChat as Record<string, unknown>)
+          .length === 0
+      ) {
+        delete mergedMessages.groupChat;
+      }
+    }
+
     const merged = {
       ...fullConfig,
       agents: {
@@ -1039,6 +1338,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           mode: managedGateway.reloadMode,
         },
       },
+      commands: mergedCommands,
+      messages: mergedMessages,
     };
     return merged as Record<string, unknown>;
   };
@@ -1053,9 +1354,13 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     normalizedAgents: VisualAgent[];
     normalizedBindings: VisualBinding[];
     normalizedGateway: ManagedGatewayConfig;
+    normalizedCommands: ManagedCommandsConfig;
+    normalizedMessages: ManagedMessagesConfig;
     bindingsPayload: BindingsPayload;
   } => {
     const normalizedGateway = normalizeManagedGateway(gatewayConfig);
+    const normalizedCommands = normalizeManagedCommands(commandsConfig);
+    const normalizedMessages = normalizeManagedMessages(messagesConfig);
 
     if (expertMode) {
       const parsedAgentsList = JSON.parse(agentsListText);
@@ -1075,7 +1380,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       const validationError = validateVisualConfig(
         normalizedAgents,
         normalizedBindings,
-        normalizedGateway
+        normalizedGateway,
+        normalizedCommands,
+        normalizedMessages
       );
       if (validationError) {
         throw new Error(validationError);
@@ -1091,6 +1398,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         normalizedAgents,
         normalizedBindings,
         normalizedGateway,
+        normalizedCommands,
+        normalizedMessages,
         bindingsPayload: parsedBindings,
       };
     }
@@ -1101,7 +1410,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     const validationError = validateVisualConfig(
       normalizedAgents,
       normalizedBindings,
-      normalizedGateway
+      normalizedGateway,
+      normalizedCommands,
+      normalizedMessages
     );
     if (validationError) {
       throw new Error(validationError);
@@ -1121,6 +1432,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       normalizedAgents,
       normalizedBindings,
       normalizedGateway,
+      normalizedCommands,
+      normalizedMessages,
       bindingsPayload,
     };
   };
@@ -1136,7 +1449,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       const globalInputConfig = await buildGlobalInputConfigPayload(
         buildAgentsPayload(payload.normalizedAgents),
         payload.bindingsPayload,
-        payload.normalizedGateway
+        payload.normalizedGateway,
+        payload.normalizedCommands,
+        payload.normalizedMessages
       );
       const result = await invoke<PreviewConfigResponse>(
         "preview_config_change",
@@ -1180,7 +1495,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       const globalInputConfig = await buildGlobalInputConfigPayload(
         buildAgentsPayload(payload.normalizedAgents),
         payload.bindingsPayload,
-        payload.normalizedGateway
+        payload.normalizedGateway,
+        payload.normalizedCommands,
+        payload.normalizedMessages
       );
 
       const preview = await invoke<PreviewConfigResponse>(
@@ -1227,11 +1544,21 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setGatewayBindPreset(
         detectGatewayBindPreset(payload.normalizedGateway.bind)
       );
+      setCommandsConfig(payload.normalizedCommands);
+      setCommandAllowFromInput(
+        (payload.normalizedCommands.allowFromAll ?? []).join("\n")
+      );
+      setMessagesConfig(payload.normalizedMessages);
+      setMessagesHistoryLimitInput(
+        String(payload.normalizedMessages.groupChatHistoryLimit)
+      );
       setBaselineManagedSignature(
         buildManagedConfigSignature(
           payload.normalizedAgents,
           payload.normalizedBindings,
-          payload.normalizedGateway
+          payload.normalizedGateway,
+          payload.normalizedCommands,
+          payload.normalizedMessages
         )
       );
       setConfigMessage(
@@ -1294,6 +1621,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         parseBindings(bindingsResult)
       );
       const nextGatewayConfig = parseGatewayConfig(fullConfigResult);
+      const { nextCommandsConfig, nextMessagesConfig } =
+        applyRuntimeConfigSnapshot(fullConfigResult);
 
       setVisualAgents(nextVisualAgents);
       setVisualBindings(nextVisualBindings);
@@ -1310,7 +1639,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         buildManagedConfigSignature(
           nextVisualAgents,
           nextVisualBindings,
-          nextGatewayConfig
+          nextGatewayConfig,
+          nextCommandsConfig,
+          nextMessagesConfig
         )
       );
       setShowRollbackDialog(false);
@@ -1443,6 +1774,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         const nextVisualAgents = parseAgentsList(agentsList);
         const nextVisualBindings = parsedBindings;
         const nextGatewayConfig = parseGatewayConfig(loadedFullConfig);
+        const { nextCommandsConfig, nextMessagesConfig } =
+          applyRuntimeConfigSnapshot(loadedFullConfig);
 
         setVisualAgents(nextVisualAgents);
         setVisualBindings(nextVisualBindings);
@@ -1459,7 +1792,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           buildManagedConfigSignature(
             nextVisualAgents,
             nextVisualBindings,
-            nextGatewayConfig
+            nextGatewayConfig,
+            nextCommandsConfig,
+            nextMessagesConfig
           )
         );
 
@@ -1495,10 +1830,14 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         parseBindings(parsedBindings)
       );
       const nextGateway = normalizeManagedGateway(gatewayConfig);
+      const nextCommands = normalizeManagedCommands(commandsConfig);
+      const nextMessages = normalizeManagedMessages(messagesConfig);
       const validationError = validateVisualConfig(
         nextVisualAgents,
         nextVisualBindings,
-        nextGateway
+        nextGateway,
+        nextCommands,
+        nextMessages
       );
       if (validationError) {
         throw new Error(validationError);
@@ -1511,6 +1850,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setGatewayPortInput(String(nextGateway.port));
       setGatewayTrustedProxyInput(nextGateway.trustedProxies.join("\n"));
       setGatewayBindPreset(detectGatewayBindPreset(nextGateway.bind));
+      setCommandsConfig(nextCommands);
+      setCommandAllowFromInput((nextCommands.allowFromAll ?? []).join("\n"));
+      setMessagesConfig(nextMessages);
+      setMessagesHistoryLimitInput(String(nextMessages.groupChatHistoryLimit));
       setExpertMode(false);
       return true;
     } catch (e) {
@@ -1761,6 +2104,81 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       ...prev,
       reloadMode: value,
     }));
+  };
+
+  const handleCommandsNativeChange = (value: CommandsNativeMode | "") => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setCommandsConfig((prev) => ({
+      ...prev,
+      native: value || undefined,
+    }));
+  };
+
+  const handleCommandsToggleChange = (
+    field: Exclude<keyof ManagedCommandsConfig, "native" | "allowFromAll">,
+    checked: boolean
+  ) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setCommandsConfig((prev) => ({
+      ...prev,
+      [field]: checked,
+    }));
+  };
+
+  const handleCommandsAllowFromInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setCommandAllowFromInput(value);
+    setCommandsConfig((prev) => ({
+      ...prev,
+      allowFromAll: value
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter((item) => Boolean(item)),
+    }));
+  };
+
+  const handleMessagesHistoryLimitEnabledChange = (checked: boolean) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setMessagesConfig((prev) => ({
+      ...prev,
+      groupChatHistoryLimitEnabled: checked,
+    }));
+  };
+
+  const handleMessagesHistoryLimitInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setMessagesHistoryLimitInput(value);
+
+    const parsed = Number(value);
+    setMessagesConfig((prev) => ({
+      ...prev,
+      groupChatHistoryLimit: Number.isInteger(parsed) ? parsed : Number.NaN,
+    }));
+  };
+
+  const applyRuntimeConfigSnapshot = (fullConfig: unknown) => {
+    const nextCommandsConfig = parseCommandsConfig(fullConfig);
+    const nextMessagesConfig = parseMessagesConfig(fullConfig);
+
+    setCommandsConfig(nextCommandsConfig);
+    setCommandAllowFromInput(
+      (nextCommandsConfig.allowFromAll ?? []).join("\n")
+    );
+    setMessagesConfig(nextMessagesConfig);
+
+    setMessagesHistoryLimitInput(
+      String(nextMessagesConfig.groupChatHistoryLimit)
+    );
+
+    return {
+      nextCommandsConfig,
+      nextMessagesConfig,
+    };
   };
 
   const configCenterPanel = (
@@ -2182,6 +2600,172 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
               }`}
             >
               {gatewayValidationHint ?? "Gateway 参数校验通过"}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+              <h4 className="text-sm font-semibold text-white">Commands</h4>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  native
+                </label>
+                <select
+                  value={commandsConfig.native ?? ""}
+                  onChange={(e) =>
+                    handleCommandsNativeChange(
+                      e.target.value as CommandsNativeMode | ""
+                    )
+                  }
+                  className="input-base"
+                >
+                  <option value="">未设置（保持现状）</option>
+                  <option value="auto">auto</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-sm text-gray-300">
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={commandsConfig.text ?? false}
+                    onChange={(e) =>
+                      handleCommandsToggleChange("text", e.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  text
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={commandsConfig.bash ?? false}
+                    onChange={(e) =>
+                      handleCommandsToggleChange("bash", e.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  bash
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={commandsConfig.config ?? false}
+                    onChange={(e) =>
+                      handleCommandsToggleChange("config", e.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  config
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={commandsConfig.debug ?? false}
+                    onChange={(e) =>
+                      handleCommandsToggleChange("debug", e.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  debug
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={commandsConfig.restart ?? false}
+                    onChange={(e) =>
+                      handleCommandsToggleChange("restart", e.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  restart
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={commandsConfig.useAccessGroups ?? false}
+                    onChange={(e) =>
+                      handleCommandsToggleChange(
+                        "useAccessGroups",
+                        e.target.checked
+                      )
+                    }
+                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  useAccessGroups
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  allowFrom（每行一个主体）
+                </label>
+                <textarea
+                  value={commandAllowFromInput}
+                  onChange={(e) =>
+                    handleCommandsAllowFromInputChange(e.target.value)
+                  }
+                  rows={4}
+                  className="input-base font-mono text-xs"
+                  placeholder={"*\ntelegram:123456"}
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  将写入 commands.allowFrom["*"]。
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+              <h4 className="text-sm font-semibold text-white">Messages</h4>
+
+              <div className="flex items-center justify-between p-3 rounded-lg bg-dark-700/60 border border-dark-500">
+                <div>
+                  <p className="text-sm text-white">groupChat.historyLimit</p>
+                  <p className="text-xs text-gray-500">
+                    关闭时不写该字段，回退默认行为。
+                  </p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="sr-only peer"
+                    checked={messagesConfig.groupChatHistoryLimitEnabled}
+                    onChange={(e) =>
+                      handleMessagesHistoryLimitEnabledChange(e.target.checked)
+                    }
+                  />
+                  <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  historyLimit (&gt;= 0)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={messagesHistoryLimitInput}
+                  onChange={(e) =>
+                    handleMessagesHistoryLimitInputChange(e.target.value)
+                  }
+                  disabled={!messagesConfig.groupChatHistoryLimitEnabled}
+                  className="input-base disabled:opacity-60"
+                />
+                <p
+                  className={`text-xs mt-1 ${
+                    messagesHistoryLimitHint
+                      ? "text-amber-300"
+                      : "text-gray-500"
+                  }`}
+                >
+                  {messagesHistoryLimitHint ??
+                    "用于 messages.groupChat.historyLimit"}
+                </p>
+              </div>
             </div>
           </div>
 
