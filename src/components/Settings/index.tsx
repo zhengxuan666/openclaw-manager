@@ -141,6 +141,25 @@ interface ManagedMessagesConfig {
 
 type ConfigCenterView = "general" | "center";
 type ConfigCenterTab = "agent" | "routing" | "runtime" | "advanced";
+type RuntimeSectionKey = "commands" | "messages" | "web" | "tools";
+type RuntimeStatus = "connected" | "planned";
+
+interface RuntimeFieldDoc {
+  name: string;
+  description: string;
+  defaultHint?: string;
+  recommendedHint?: string;
+  riskHint?: string;
+}
+
+interface RuntimeSectionDoc {
+  key: RuntimeSectionKey;
+  title: string;
+  status: RuntimeStatus;
+  functionDescription: string;
+  fields: RuntimeFieldDoc[];
+  riskTip: string;
+}
 
 const CONFIG_CENTER_TABS: Array<{ key: ConfigCenterTab; label: string }> = [
   { key: "agent", label: "Agent" },
@@ -149,25 +168,206 @@ const CONFIG_CENTER_TABS: Array<{ key: ConfigCenterTab; label: string }> = [
   { key: "advanced", label: "高级(JSON)" },
 ];
 
-const RUNTIME_PLACEHOLDER_CARDS: Array<{
-  key: string;
-  title: string;
-  description: string;
-}> = [
+const RUNTIME_SECTION_DOCS: RuntimeSectionDoc[] = [
+  {
+    key: "commands",
+    title: "Commands",
+    status: "connected",
+    functionDescription:
+      "控制命令能力开关、执行方式与允许来源，决定 Runtime 可调用命令的边界。",
+    fields: [
+      {
+        name: "native",
+        description: "命令解析策略。",
+        defaultHint: "auto",
+        recommendedHint: "推荐保持 auto，兼顾兼容性与稳定性",
+      },
+      {
+        name: "text",
+        description: "控制纯文本命令触发能力。",
+        defaultHint: "false（未设置时保持现状）",
+        recommendedHint: "仅在需要时开启",
+      },
+      {
+        name: "bash",
+        description: "控制 Bash 命令执行能力。",
+        defaultHint: "false（未设置时保持现状）",
+        recommendedHint: "建议默认关闭",
+        riskHint: "可直接执行系统命令，风险最高",
+      },
+      {
+        name: "config",
+        description: "控制配置管理类命令能力。",
+        defaultHint: "false（未设置时保持现状）",
+        recommendedHint: "仅在需要远程配置操作时开启",
+      },
+      {
+        name: "debug",
+        description: "控制调试诊断类命令能力。",
+        defaultHint: "false（未设置时保持现状）",
+        recommendedHint: "建议在排障期间临时开启",
+      },
+      {
+        name: "restart",
+        description: "控制服务重启类命令能力。",
+        defaultHint: "false（未设置时保持现状）",
+        recommendedHint: "仅授权给管理员来源",
+        riskHint: "误触发可能导致服务中断",
+      },
+      {
+        name: "useAccessGroups",
+        description: "启用访问分组策略，配合主体授权细化控制。",
+        defaultHint: "false（未设置时保持现状）",
+        recommendedHint: "多租户/多群组场景建议开启",
+      },
+      {
+        name: "allowFrom[*]",
+        description: "允许触发命令的主体列表。",
+        defaultHint: "空列表=不放行额外主体",
+        recommendedHint: "按渠道或账号精确授权",
+        riskHint: "通配或过宽授权会扩大误触发面",
+      },
+    ],
+    riskTip:
+      "开启 bash 或宽泛 allowFrom 可能带来高风险操作能力，务必限制来源并结合审计。",
+  },
+  {
+    key: "messages",
+    title: "Messages",
+    status: "connected",
+    functionDescription:
+      "控制群聊历史截断策略，影响上下文长度、成本与响应稳定性。",
+    fields: [
+      {
+        name: "groupChat.historyLimitEnabled",
+        description: "是否启用历史条数显式配置。",
+        defaultHint: "false（关闭时不写字段）",
+        recommendedHint: "仅在需固定上下文窗口时开启",
+      },
+      {
+        name: "groupChat.historyLimit",
+        description: "保留的历史消息条数（>= 0 的整数）。",
+        defaultHint: "0",
+        recommendedHint: "常见建议 20~100",
+      },
+    ],
+    riskTip:
+      "historyLimit 过大将增加上下文成本与延迟，过小可能导致上下文不足。",
+  },
   {
     key: "web",
     title: "Web",
-    description: "Web 访问入口策略（预留，Phase 2B 接入）",
+    status: "planned",
+    functionDescription:
+      "规划中的 Web 访问入口策略，用于控制控制台入口与来源访问约束。",
+    fields: [
+      {
+        name: "entryPolicy（规划）",
+        description: "入口暴露策略（如内网/公网/只读）。",
+        defaultHint: "Phase 2B 待定",
+        recommendedHint: "默认建议内网优先",
+      },
+      {
+        name: "allowOrigins（规划）",
+        description: "允许访问来源域名列表。",
+        defaultHint: "Phase 2B 待定",
+        recommendedHint: "建议显式白名单",
+      },
+    ],
+    riskTip: "公网暴露且来源限制不足可能导致未授权访问风险。",
   },
   {
     key: "tools",
     title: "Tools",
-    description: "工具调用白名单与限流（预留，Phase 2B 接入）",
+    status: "planned",
+    functionDescription:
+      "规划中的工具调用治理项，用于限制工具范围、频率和执行时长。",
+    fields: [
+      {
+        name: "whitelist（规划）",
+        description: "允许调用的工具集合。",
+        defaultHint: "Phase 2B 待定",
+        recommendedHint: "优先最小白名单",
+      },
+      {
+        name: "rateLimit / timeout（规划）",
+        description: "每分钟调用上限与超时控制。",
+        defaultHint: "Phase 2B 待定",
+        recommendedHint: "建议按业务峰值预留安全余量",
+      },
+    ],
+    riskTip: "缺少限流与超时控制可能导致资源耗尽或异常放大。",
   },
 ];
 
+const RUNTIME_SECTION_DOC_MAP: Record<RuntimeSectionKey, RuntimeSectionDoc> =
+  RUNTIME_SECTION_DOCS.reduce((acc, section) => {
+    acc[section.key] = section;
+    return acc;
+  }, {} as Record<RuntimeSectionKey, RuntimeSectionDoc>);
+
+type CommandToggleField = Exclude<
+  keyof ManagedCommandsConfig,
+  "native" | "allowFromAll"
+>;
+
+const COMMAND_TOGGLE_FIELDS: Array<{
+  field: CommandToggleField;
+  label: string;
+  helper: string;
+  risk?: string;
+}> = [
+  {
+    field: "text",
+    label: "text",
+    helper: "控制纯文本命令触发能力。默认建议按需开启。",
+  },
+  {
+    field: "bash",
+    label: "bash",
+    helper: "控制 Bash 命令执行能力。",
+    risk: "可直接执行系统命令，建议仅在受控环境开启。",
+  },
+  {
+    field: "config",
+    label: "config",
+    helper: "控制配置管理类命令能力。",
+  },
+  {
+    field: "debug",
+    label: "debug",
+    helper: "控制调试诊断类命令能力。",
+  },
+  {
+    field: "restart",
+    label: "restart",
+    helper: "控制服务重启类命令能力。",
+    risk: "误触发可能导致会话中断。",
+  },
+  {
+    field: "useAccessGroups",
+    label: "useAccessGroups",
+    helper: "启用访问分组策略，配合主体授权细化控制。",
+  },
+];
+
+const RUNTIME_STATUS_META: Record<
+  RuntimeStatus,
+  { label: string; className: string }
+> = {
+  connected: {
+    label: "已接入",
+    className: "text-emerald-300 bg-emerald-500/10 border-emerald-500/30",
+  },
+  planned: {
+    label: "规划中 / Phase 2B",
+    className: "text-amber-300 bg-amber-500/10 border-amber-500/30",
+  },
+};
+
 const BINDING_KEY_SEPARATOR = "::";
 const MAX_DIFF_DISPLAY = 200;
+
 const DEFAULT_GATEWAY_CONFIG: ManagedGatewayConfig = {
   port: 18789,
   bind: "127.0.0.1",
@@ -1090,6 +1290,14 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     useState<ConfigCenterView>("general");
   const [activeCenterTab, setActiveCenterTab] =
     useState<ConfigCenterTab>("agent");
+  const [runtimeDocExpanded, setRuntimeDocExpanded] = useState<
+    Record<RuntimeSectionKey, boolean>
+  >({
+    commands: false,
+    messages: false,
+    web: false,
+    tools: false,
+  });
   const [expertMode, setExpertMode] = useState(false);
 
   const [visualAgents, setVisualAgents] = useState<VisualAgent[]>([]);
@@ -2116,7 +2324,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   };
 
   const handleCommandsToggleChange = (
-    field: Exclude<keyof ManagedCommandsConfig, "native" | "allowFromAll">,
+    field: CommandToggleField,
     checked: boolean
   ) => {
     setConfigError(null);
@@ -2159,6 +2367,81 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       ...prev,
       groupChatHistoryLimit: Number.isInteger(parsed) ? parsed : Number.NaN,
     }));
+  };
+
+  const handleRuntimeDocToggle = (sectionKey: RuntimeSectionKey) => {
+    setRuntimeDocExpanded((prev) => ({
+      ...prev,
+      [sectionKey]: !prev[sectionKey],
+    }));
+  };
+
+  const renderRuntimeDoc = (sectionKey: RuntimeSectionKey) => {
+    const section = RUNTIME_SECTION_DOC_MAP[sectionKey];
+    const statusMeta = RUNTIME_STATUS_META[section.status];
+    const expanded = runtimeDocExpanded[sectionKey];
+
+    return (
+      <div className="rounded-lg border border-dark-500 bg-dark-700/60 p-3 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-semibold text-white">
+                {section.title} 说明
+              </p>
+              <span
+                className={`text-[11px] px-2 py-0.5 rounded-full border ${statusMeta.className}`}
+              >
+                {statusMeta.label}
+              </span>
+            </div>
+            <p className="text-xs text-gray-400">
+              {section.functionDescription}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => handleRuntimeDocToggle(sectionKey)}
+            className="text-xs px-2.5 py-1.5 rounded-md bg-dark-600 hover:bg-dark-500 text-gray-200 transition-colors"
+          >
+            {expanded ? "收起说明" : "展开说明"}
+          </button>
+        </div>
+
+        {expanded && (
+          <div className="space-y-3 text-xs">
+            <div className="space-y-2">
+              <p className="text-gray-300">参数说明：</p>
+              <ul className="space-y-2">
+                {section.fields.map((field) => (
+                  <li
+                    key={`${section.key}-${field.name}`}
+                    className="rounded-md border border-dark-500 bg-dark-700/70 p-2 space-y-1"
+                  >
+                    <p className="text-gray-100 font-medium">{field.name}</p>
+                    <p className="text-gray-400">{field.description}</p>
+                    {field.defaultHint && (
+                      <p className="text-gray-500">
+                        默认值：{field.defaultHint}
+                      </p>
+                    )}
+                    {field.recommendedHint && (
+                      <p className="text-cyan-300">
+                        推荐值：{field.recommendedHint}
+                      </p>
+                    )}
+                    {field.riskHint && (
+                      <p className="text-amber-300">风险：{field.riskHint}</p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <p className="text-amber-300">风险提示：{section.riskTip}</p>
+          </div>
+        )}
+      </div>
+    );
   };
 
   const applyRuntimeConfigSnapshot = (fullConfig: unknown) => {
@@ -2520,6 +2803,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                 onChange={(e) => handleGatewayPortInputChange(e.target.value)}
                 className="input-base"
               />
+              <p className="text-xs text-gray-500 mt-1">
+                Web Server 监听端口，默认 18789，建议范围 1024~49151。
+              </p>
             </div>
 
             <div>
@@ -2548,6 +2834,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                   className="input-base disabled:opacity-60"
                 />
               </div>
+              <p className="text-xs text-gray-500 mt-1">
+                推荐“仅本机”，如需外部访问请结合反向代理与访问控制。
+              </p>
             </div>
 
             <div>
@@ -2564,7 +2853,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                 placeholder={"127.0.0.1/32\n10.0.0.0/8"}
               />
               <p className="text-xs text-gray-500 mt-1">
-                支持空格、换行、逗号、分号分隔。
+                代理信任源（IP/CIDR），支持空格、换行、逗号、分号分隔。
               </p>
             </div>
 
@@ -2605,7 +2894,7 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
-              <h4 className="text-sm font-semibold text-white">Commands</h4>
+              {renderRuntimeDoc("commands")}
 
               <div>
                 <label className="block text-sm text-gray-400 mb-2">
@@ -2625,78 +2914,39 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                   <option value="true">true</option>
                   <option value="false">false</option>
                 </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  命令解析模式，默认建议 auto；仅在兼容性排障时改为 true/false。
+                </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 text-sm text-gray-300">
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={commandsConfig.text ?? false}
-                    onChange={(e) =>
-                      handleCommandsToggleChange("text", e.target.checked)
-                    }
-                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
-                  />
-                  text
-                </label>
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={commandsConfig.bash ?? false}
-                    onChange={(e) =>
-                      handleCommandsToggleChange("bash", e.target.checked)
-                    }
-                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
-                  />
-                  bash
-                </label>
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={commandsConfig.config ?? false}
-                    onChange={(e) =>
-                      handleCommandsToggleChange("config", e.target.checked)
-                    }
-                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
-                  />
-                  config
-                </label>
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={commandsConfig.debug ?? false}
-                    onChange={(e) =>
-                      handleCommandsToggleChange("debug", e.target.checked)
-                    }
-                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
-                  />
-                  debug
-                </label>
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={commandsConfig.restart ?? false}
-                    onChange={(e) =>
-                      handleCommandsToggleChange("restart", e.target.checked)
-                    }
-                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
-                  />
-                  restart
-                </label>
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={commandsConfig.useAccessGroups ?? false}
-                    onChange={(e) =>
-                      handleCommandsToggleChange(
-                        "useAccessGroups",
-                        e.target.checked
-                      )
-                    }
-                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
-                  />
-                  useAccessGroups
-                </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-300">
+                {COMMAND_TOGGLE_FIELDS.map((item) => (
+                  <div
+                    key={item.field}
+                    className="rounded-lg border border-dark-500 bg-dark-700/70 p-3 space-y-2"
+                  >
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={commandsConfig[item.field] ?? false}
+                        onChange={(e) =>
+                          handleCommandsToggleChange(
+                            item.field,
+                            e.target.checked
+                          )
+                        }
+                        className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                      />
+                      {item.label}
+                    </label>
+                    <p className="text-xs text-gray-500">{item.helper}</p>
+                    {item.risk && (
+                      <p className="text-xs text-amber-300">
+                        风险：{item.risk}
+                      </p>
+                    )}
+                  </div>
+                ))}
               </div>
 
               <div>
@@ -2713,19 +2963,22 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                   placeholder={"*\ntelegram:123456"}
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  将写入 commands.allowFrom["*"]。
+                  写入
+                  commands.allowFrom["*"]，建议按账号精确授权，避免使用全量通配。
                 </p>
               </div>
             </div>
 
             <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
-              <h4 className="text-sm font-semibold text-white">Messages</h4>
+              {renderRuntimeDoc("messages")}
 
               <div className="flex items-center justify-between p-3 rounded-lg bg-dark-700/60 border border-dark-500">
                 <div>
-                  <p className="text-sm text-white">groupChat.historyLimit</p>
+                  <p className="text-sm text-white">
+                    groupChat.historyLimitEnabled
+                  </p>
                   <p className="text-xs text-gray-500">
-                    关闭时不写该字段，回退默认行为。
+                    开启后写入 historyLimit；关闭则不写字段并回退默认行为。
                   </p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
@@ -2763,22 +3016,15 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                   }`}
                 >
                   {messagesHistoryLimitHint ??
-                    "用于 messages.groupChat.historyLimit"}
+                    "默认 0，建议 20~100；过大会增加成本与延迟。"}
                 </p>
               </div>
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {RUNTIME_PLACEHOLDER_CARDS.map((card) => (
-              <div
-                key={card.key}
-                className="rounded-xl border border-dark-500 bg-dark-600 p-4"
-              >
-                <p className="text-sm font-medium text-white">{card.title}</p>
-                <p className="text-xs text-gray-500 mt-2">{card.description}</p>
-              </div>
-            ))}
+            {renderRuntimeDoc("web")}
+            {renderRuntimeDoc("tools")}
           </div>
         </div>
       )}
