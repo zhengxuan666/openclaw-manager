@@ -139,6 +139,25 @@ interface ManagedMessagesConfig {
   groupChatHistoryLimit: number;
 }
 
+interface ManagedWebReconnectConfig {
+  initialMs: number;
+  maxMs: number;
+  factor: number;
+  jitter: number;
+  maxAttempts: number;
+}
+
+interface ManagedWebConfig {
+  enabled: boolean;
+  heartbeatSeconds: number;
+  reconnect: ManagedWebReconnectConfig;
+}
+
+interface ManagedToolsConfig {
+  allow: string[];
+  deny: string[];
+}
+
 type ConfigCenterView = "general" | "center";
 type ConfigCenterTab = "agent" | "routing" | "runtime" | "advanced";
 type RuntimeSectionKey = "commands" | "messages" | "web" | "tools";
@@ -257,46 +276,54 @@ const RUNTIME_SECTION_DOCS: RuntimeSectionDoc[] = [
   {
     key: "web",
     title: "Web",
-    status: "planned",
+    status: "connected",
     functionDescription:
-      "规划中的 Web 访问入口策略，用于控制控制台入口与来源访问约束。",
+      "控制 Runtime Web 链路开关、心跳与重连参数，影响前端连接稳定性。",
     fields: [
       {
-        name: "entryPolicy（规划）",
-        description: "入口暴露策略（如内网/公网/只读）。",
-        defaultHint: "Phase 2B 待定",
-        recommendedHint: "默认建议内网优先",
+        name: "web.enabled",
+        description: "是否启用 Runtime Web 通道。",
+        defaultHint: "false",
+        recommendedHint: "生产环境按需开启",
       },
       {
-        name: "allowOrigins（规划）",
-        description: "允许访问来源域名列表。",
-        defaultHint: "Phase 2B 待定",
-        recommendedHint: "建议显式白名单",
+        name: "web.heartbeatSeconds",
+        description: "心跳间隔秒数（>= 5）。",
+        defaultHint: "30",
+        recommendedHint: "推荐 10~60",
+      },
+      {
+        name: "web.reconnect.initialMs / maxMs / factor / jitter / maxAttempts",
+        description: "基础重连参数，控制断线重试节奏与上限。",
+        defaultHint: "1000 / 30000 / 2 / 0.2 / 10",
+        recommendedHint: "先小后大，避免瞬时重连风暴",
+        riskHint: "参数不当可能导致频繁重连或恢复过慢",
       },
     ],
-    riskTip: "公网暴露且来源限制不足可能导致未授权访问风险。",
+    riskTip: "若心跳过低或重连参数配置异常，可能放大网络抖动影响。",
   },
   {
     key: "tools",
     title: "Tools",
-    status: "planned",
+    status: "connected",
     functionDescription:
-      "规划中的工具调用治理项，用于限制工具范围、频率和执行时长。",
+      "控制全局工具访问白/黑名单，统一治理 Runtime 可调用工具范围。",
     fields: [
       {
-        name: "whitelist（规划）",
-        description: "允许调用的工具集合。",
-        defaultHint: "Phase 2B 待定",
-        recommendedHint: "优先最小白名单",
+        name: "tools.allow",
+        description: "允许调用的工具名列表（string[]）。",
+        defaultHint: "[]",
+        recommendedHint: "按最小权限原则配置",
       },
       {
-        name: "rateLimit / timeout（规划）",
-        description: "每分钟调用上限与超时控制。",
-        defaultHint: "Phase 2B 待定",
-        recommendedHint: "建议按业务峰值预留安全余量",
+        name: "tools.deny",
+        description: "禁止调用的工具名列表（string[]）。",
+        defaultHint: "[]",
+        recommendedHint: "高风险工具建议显式拉黑",
+        riskHint: "与 allow 重复会产生策略冲突并阻止应用",
       },
     ],
-    riskTip: "缺少限流与超时控制可能导致资源耗尽或异常放大。",
+    riskTip: "allow/deny 冲突会导致配置不可应用，请保持清晰单一策略。",
   },
 ];
 
@@ -367,6 +394,14 @@ const RUNTIME_STATUS_META: Record<
 
 const BINDING_KEY_SEPARATOR = "::";
 const MAX_DIFF_DISPLAY = 200;
+const WEB_HEARTBEAT_MIN_SECONDS = 5;
+const WEB_RECONNECT_INITIAL_MS_MIN = 100;
+const WEB_RECONNECT_MAX_MS_MIN = 500;
+const WEB_RECONNECT_FACTOR_MIN = 1;
+const WEB_RECONNECT_JITTER_MIN = 0;
+const WEB_RECONNECT_JITTER_MAX = 1;
+const WEB_RECONNECT_MAX_ATTEMPTS_MIN = 0;
+const TOOL_LIST_SPLIT_PATTERN = /[\r\n,，;；]+/;
 
 const DEFAULT_GATEWAY_CONFIG: ManagedGatewayConfig = {
   port: 18789,
@@ -377,6 +412,21 @@ const DEFAULT_GATEWAY_CONFIG: ManagedGatewayConfig = {
 const DEFAULT_MESSAGES_CONFIG: ManagedMessagesConfig = {
   groupChatHistoryLimitEnabled: false,
   groupChatHistoryLimit: 0,
+};
+const DEFAULT_WEB_CONFIG: ManagedWebConfig = {
+  enabled: false,
+  heartbeatSeconds: 30,
+  reconnect: {
+    initialMs: 1000,
+    maxMs: 30000,
+    factor: 2,
+    jitter: 0.2,
+    maxAttempts: 10,
+  },
+};
+const DEFAULT_TOOLS_CONFIG: ManagedToolsConfig = {
+  allow: [],
+  deny: [],
 };
 
 const GATEWAY_RELOAD_MODE_OPTIONS: Array<{
@@ -945,6 +995,65 @@ function normalizeAllowFromList(value: unknown): string[] | undefined {
   return undefined;
 }
 
+function parseToolNameList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(
+      new Set(
+        value
+          .map((item) => (typeof item === "string" ? item.trim() : ""))
+          .filter((item) => Boolean(item))
+      )
+    );
+  }
+
+  if (typeof value === "string") {
+    return Array.from(
+      new Set(
+        value
+          .split(TOOL_LIST_SPLIT_PATTERN)
+          .map((item) => item.trim())
+          .filter((item) => Boolean(item))
+      )
+    );
+  }
+
+  return [];
+}
+
+function parseToolListInput(value: string): string[] {
+  return parseToolNameList(value);
+}
+
+function parseIntegerFromUnknown(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed);
+    }
+  }
+
+  return undefined;
+}
+
+function parseNumberFromUnknown(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
 function parseCommandsConfig(config: unknown): ManagedCommandsConfig {
   if (!isRecord(config) || !isRecord(config.commands)) {
     return {};
@@ -1023,6 +1132,150 @@ function normalizeManagedMessages(
   };
 }
 
+function parseWebConfig(config: unknown): ManagedWebConfig {
+  if (!isRecord(config) || !isRecord(config.web)) {
+    return {
+      ...DEFAULT_WEB_CONFIG,
+      reconnect: { ...DEFAULT_WEB_CONFIG.reconnect },
+    };
+  }
+
+  const web = config.web;
+  const reconnect = isRecord(web.reconnect) ? web.reconnect : {};
+
+  const heartbeatSeconds = parseIntegerFromUnknown(web.heartbeatSeconds);
+  const initialMs = parseIntegerFromUnknown(reconnect.initialMs);
+  const maxMs = parseIntegerFromUnknown(reconnect.maxMs);
+  const factor = parseNumberFromUnknown(reconnect.factor);
+  const jitter = parseNumberFromUnknown(reconnect.jitter);
+  const maxAttempts = parseIntegerFromUnknown(reconnect.maxAttempts);
+
+  return {
+    enabled:
+      typeof web.enabled === "boolean"
+        ? web.enabled
+        : DEFAULT_WEB_CONFIG.enabled,
+    heartbeatSeconds:
+      heartbeatSeconds !== undefined &&
+      heartbeatSeconds >= WEB_HEARTBEAT_MIN_SECONDS
+        ? heartbeatSeconds
+        : DEFAULT_WEB_CONFIG.heartbeatSeconds,
+    reconnect: {
+      initialMs:
+        initialMs !== undefined && initialMs >= WEB_RECONNECT_INITIAL_MS_MIN
+          ? initialMs
+          : DEFAULT_WEB_CONFIG.reconnect.initialMs,
+      maxMs:
+        maxMs !== undefined && maxMs >= WEB_RECONNECT_MAX_MS_MIN
+          ? maxMs
+          : DEFAULT_WEB_CONFIG.reconnect.maxMs,
+      factor:
+        factor !== undefined && factor >= WEB_RECONNECT_FACTOR_MIN
+          ? factor
+          : DEFAULT_WEB_CONFIG.reconnect.factor,
+      jitter:
+        jitter !== undefined &&
+        jitter >= WEB_RECONNECT_JITTER_MIN &&
+        jitter <= WEB_RECONNECT_JITTER_MAX
+          ? jitter
+          : DEFAULT_WEB_CONFIG.reconnect.jitter,
+      maxAttempts:
+        maxAttempts !== undefined &&
+        maxAttempts >= WEB_RECONNECT_MAX_ATTEMPTS_MIN
+          ? maxAttempts
+          : DEFAULT_WEB_CONFIG.reconnect.maxAttempts,
+    },
+  };
+}
+
+function normalizeManagedWeb(web: ManagedWebConfig): ManagedWebConfig {
+  const reconnect = {
+    initialMs: Number.isFinite(web.reconnect.initialMs)
+      ? Math.max(
+          WEB_RECONNECT_INITIAL_MS_MIN,
+          Math.trunc(web.reconnect.initialMs)
+        )
+      : DEFAULT_WEB_CONFIG.reconnect.initialMs,
+    maxMs: Number.isFinite(web.reconnect.maxMs)
+      ? Math.max(WEB_RECONNECT_MAX_MS_MIN, Math.trunc(web.reconnect.maxMs))
+      : DEFAULT_WEB_CONFIG.reconnect.maxMs,
+    factor: Number.isFinite(web.reconnect.factor)
+      ? Math.max(WEB_RECONNECT_FACTOR_MIN, web.reconnect.factor)
+      : DEFAULT_WEB_CONFIG.reconnect.factor,
+    jitter: Number.isFinite(web.reconnect.jitter)
+      ? Math.min(
+          WEB_RECONNECT_JITTER_MAX,
+          Math.max(WEB_RECONNECT_JITTER_MIN, web.reconnect.jitter)
+        )
+      : DEFAULT_WEB_CONFIG.reconnect.jitter,
+    maxAttempts: Number.isFinite(web.reconnect.maxAttempts)
+      ? Math.max(
+          WEB_RECONNECT_MAX_ATTEMPTS_MIN,
+          Math.trunc(web.reconnect.maxAttempts)
+        )
+      : DEFAULT_WEB_CONFIG.reconnect.maxAttempts,
+  };
+
+  if (reconnect.maxMs < reconnect.initialMs) {
+    reconnect.maxMs = reconnect.initialMs;
+  }
+
+  return {
+    enabled: Boolean(web.enabled),
+    heartbeatSeconds: Number.isFinite(web.heartbeatSeconds)
+      ? Math.max(WEB_HEARTBEAT_MIN_SECONDS, Math.trunc(web.heartbeatSeconds))
+      : DEFAULT_WEB_CONFIG.heartbeatSeconds,
+    reconnect,
+  };
+}
+
+function parseToolsConfig(config: unknown): ManagedToolsConfig {
+  if (!isRecord(config) || !isRecord(config.tools)) {
+    return {
+      ...DEFAULT_TOOLS_CONFIG,
+      allow: [...DEFAULT_TOOLS_CONFIG.allow],
+      deny: [...DEFAULT_TOOLS_CONFIG.deny],
+    };
+  }
+
+  const tools = config.tools;
+
+  return {
+    allow: parseToolNameList(tools.allow),
+    deny: parseToolNameList(tools.deny),
+  };
+}
+
+function normalizeManagedTools(tools: ManagedToolsConfig): ManagedToolsConfig {
+  return {
+    allow: parseToolNameList(tools.allow),
+    deny: parseToolNameList(tools.deny),
+  };
+}
+
+function buildWebPayload(web: ManagedWebConfig): Record<string, unknown> {
+  const normalized = normalizeManagedWeb(web);
+  return {
+    enabled: normalized.enabled,
+    heartbeatSeconds: normalized.heartbeatSeconds,
+    reconnect: {
+      initialMs: normalized.reconnect.initialMs,
+      maxMs: normalized.reconnect.maxMs,
+      factor: normalized.reconnect.factor,
+      jitter: normalized.reconnect.jitter,
+      maxAttempts: normalized.reconnect.maxAttempts,
+    },
+  };
+}
+
+function buildToolsPayload(tools: ManagedToolsConfig): Record<string, unknown> {
+  const normalized = normalizeManagedTools(tools);
+  return {
+    allow: normalized.allow,
+    deny: normalized.deny,
+  };
+}
+
 function normalizeManagedGateway(
   gateway: ManagedGatewayConfig
 ): ManagedGatewayConfig {
@@ -1096,13 +1349,17 @@ function normalizeVisualConfig(
   bindings: VisualBinding[],
   gateway: ManagedGatewayConfig,
   commands: ManagedCommandsConfig,
-  messages: ManagedMessagesConfig
+  messages: ManagedMessagesConfig,
+  web: ManagedWebConfig,
+  tools: ManagedToolsConfig
 ): {
   agents: VisualAgent[];
   bindings: VisualBinding[];
   gateway: ManagedGatewayConfig;
   commands: ManagedCommandsConfig;
   messages: ManagedMessagesConfig;
+  web: ManagedWebConfig;
+  tools: ManagedToolsConfig;
 } {
   return {
     agents: normalizeVisualAgents(agents),
@@ -1110,6 +1367,8 @@ function normalizeVisualConfig(
     gateway: normalizeManagedGateway(gateway),
     commands: normalizeManagedCommands(commands),
     messages: normalizeManagedMessages(messages),
+    web: normalizeManagedWeb(web),
+    tools: normalizeManagedTools(tools),
   };
 }
 
@@ -1118,14 +1377,18 @@ function buildManagedConfigSignature(
   bindings: VisualBinding[],
   gateway: ManagedGatewayConfig,
   commands: ManagedCommandsConfig,
-  messages: ManagedMessagesConfig
+  messages: ManagedMessagesConfig,
+  web: ManagedWebConfig,
+  tools: ManagedToolsConfig
 ): string {
   const normalized = normalizeVisualConfig(
     agents,
     bindings,
     gateway,
     commands,
-    messages
+    messages,
+    web,
+    tools
   );
   const agentsPayload = buildAgentsPayload(normalized.agents);
   const bindingsMap = bindingsRulesToMap(normalized.bindings);
@@ -1144,6 +1407,8 @@ function buildManagedConfigSignature(
       },
       commands: buildCommandsPayload(normalized.commands),
       messages: buildMessagesPayload(normalized.messages),
+      web: buildWebPayload(normalized.web),
+      tools: buildToolsPayload(normalized.tools),
     })
   );
 }
@@ -1153,7 +1418,9 @@ function validateVisualConfig(
   bindings: VisualBinding[],
   gateway: ManagedGatewayConfig,
   commands: ManagedCommandsConfig,
-  messages: ManagedMessagesConfig
+  messages: ManagedMessagesConfig,
+  web: ManagedWebConfig,
+  tools: ManagedToolsConfig
 ): string | null {
   const idSet = new Set<string>();
   for (let i = 0; i < agents.length; i += 1) {
@@ -1240,6 +1507,61 @@ function validateVisualConfig(
     return "Messages groupChat.historyLimit 无效：必须为 >= 0 的整数";
   }
 
+  if (
+    !Number.isInteger(web.heartbeatSeconds) ||
+    web.heartbeatSeconds < WEB_HEARTBEAT_MIN_SECONDS
+  ) {
+    return `Web heartbeatSeconds 无效：必须为 >= ${WEB_HEARTBEAT_MIN_SECONDS} 的整数`;
+  }
+
+  if (
+    !Number.isInteger(web.reconnect.initialMs) ||
+    web.reconnect.initialMs < WEB_RECONNECT_INITIAL_MS_MIN
+  ) {
+    return `Web reconnect.initialMs 无效：必须为 >= ${WEB_RECONNECT_INITIAL_MS_MIN} 的整数`;
+  }
+
+  if (
+    !Number.isInteger(web.reconnect.maxMs) ||
+    web.reconnect.maxMs < WEB_RECONNECT_MAX_MS_MIN
+  ) {
+    return `Web reconnect.maxMs 无效：必须为 >= ${WEB_RECONNECT_MAX_MS_MIN} 的整数`;
+  }
+
+  if (web.reconnect.maxMs < web.reconnect.initialMs) {
+    return "Web reconnect.maxMs 无效：必须 >= reconnect.initialMs";
+  }
+
+  if (
+    !Number.isFinite(web.reconnect.factor) ||
+    web.reconnect.factor < WEB_RECONNECT_FACTOR_MIN
+  ) {
+    return `Web reconnect.factor 无效：必须为 >= ${WEB_RECONNECT_FACTOR_MIN} 的数字`;
+  }
+
+  if (
+    !Number.isFinite(web.reconnect.jitter) ||
+    web.reconnect.jitter < WEB_RECONNECT_JITTER_MIN ||
+    web.reconnect.jitter > WEB_RECONNECT_JITTER_MAX
+  ) {
+    return `Web reconnect.jitter 无效：必须在 ${WEB_RECONNECT_JITTER_MIN}~${WEB_RECONNECT_JITTER_MAX} 之间`;
+  }
+
+  if (
+    !Number.isInteger(web.reconnect.maxAttempts) ||
+    web.reconnect.maxAttempts < WEB_RECONNECT_MAX_ATTEMPTS_MIN
+  ) {
+    return `Web reconnect.maxAttempts 无效：必须为 >= ${WEB_RECONNECT_MAX_ATTEMPTS_MIN} 的整数`;
+  }
+
+  const normalizedTools = normalizeManagedTools(tools);
+  const toolConflict = normalizedTools.allow.find((name) =>
+    normalizedTools.deny.includes(name)
+  );
+  if (toolConflict) {
+    return `Tools allow/deny 冲突：${toolConflict} 同时存在于 allow 与 deny`;
+  }
+
   return null;
 }
 
@@ -1275,12 +1597,42 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const [messagesHistoryLimitInput, setMessagesHistoryLimitInput] = useState(
     String(DEFAULT_MESSAGES_CONFIG.groupChatHistoryLimit)
   );
+  const [webConfig, setWebConfig] = useState<ManagedWebConfig>({
+    ...DEFAULT_WEB_CONFIG,
+    reconnect: { ...DEFAULT_WEB_CONFIG.reconnect },
+  });
+  const [webHeartbeatInput, setWebHeartbeatInput] = useState(
+    String(DEFAULT_WEB_CONFIG.heartbeatSeconds)
+  );
+  const [webReconnectInitialMsInput, setWebReconnectInitialMsInput] = useState(
+    String(DEFAULT_WEB_CONFIG.reconnect.initialMs)
+  );
+  const [webReconnectMaxMsInput, setWebReconnectMaxMsInput] = useState(
+    String(DEFAULT_WEB_CONFIG.reconnect.maxMs)
+  );
+  const [webReconnectFactorInput, setWebReconnectFactorInput] = useState(
+    String(DEFAULT_WEB_CONFIG.reconnect.factor)
+  );
+  const [webReconnectJitterInput, setWebReconnectJitterInput] = useState(
+    String(DEFAULT_WEB_CONFIG.reconnect.jitter)
+  );
+  const [webReconnectMaxAttemptsInput, setWebReconnectMaxAttemptsInput] =
+    useState(String(DEFAULT_WEB_CONFIG.reconnect.maxAttempts));
+  const [toolsConfig, setToolsConfig] = useState<ManagedToolsConfig>({
+    ...DEFAULT_TOOLS_CONFIG,
+    allow: [...DEFAULT_TOOLS_CONFIG.allow],
+    deny: [...DEFAULT_TOOLS_CONFIG.deny],
+  });
+  const [toolsAllowInput, setToolsAllowInput] = useState("");
+  const [toolsDenyInput, setToolsDenyInput] = useState("");
 
   const [agentsListText, setAgentsListText] = useState("[]");
   const [bindingsText, setBindingsText] = useState("[]");
   const [, setConfigLoading] = useState(false); // 用于数据加载
   const [configError, setConfigError] = useState<string | null>(null);
+
   const [showConfigErrorModal, setShowConfigErrorModal] = useState(false);
+
   const [configMessage, setConfigMessage] = useState<string | null>(null);
   const [showConfigSuccessModal, setShowConfigSuccessModal] = useState(false);
   const [configSuccessMessage, setConfigSuccessMessage] = useState<
@@ -1321,7 +1673,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         visualBindings,
         gatewayConfig,
         commandsConfig,
-        messagesConfig
+        messagesConfig,
+        webConfig,
+        toolsConfig
       );
     }
 
@@ -1342,7 +1696,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         bindingsMapToRules(parseBindings(parsedBindings)),
         gatewayConfig,
         commandsConfig,
-        messagesConfig
+        messagesConfig,
+        webConfig,
+        toolsConfig
       );
     } catch {
       return "__invalid_json__";
@@ -1354,6 +1710,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     gatewayConfig,
     commandsConfig,
     messagesConfig,
+    webConfig,
+    toolsConfig,
     agentsListText,
     bindingsText,
   ]);
@@ -1434,21 +1792,101 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     return null;
   }, [messagesConfig.groupChatHistoryLimitEnabled, messagesHistoryLimitInput]);
 
+  const webValidationHint = useMemo(() => {
+    const heartbeatSeconds = Number(webHeartbeatInput);
+    if (
+      !Number.isInteger(heartbeatSeconds) ||
+      heartbeatSeconds < WEB_HEARTBEAT_MIN_SECONDS
+    ) {
+      return `Web heartbeatSeconds 必须为 >= ${WEB_HEARTBEAT_MIN_SECONDS} 的整数`;
+    }
+
+    const reconnectInitialMs = Number(webReconnectInitialMsInput);
+    if (
+      !Number.isInteger(reconnectInitialMs) ||
+      reconnectInitialMs < WEB_RECONNECT_INITIAL_MS_MIN
+    ) {
+      return `Web reconnect.initialMs 必须为 >= ${WEB_RECONNECT_INITIAL_MS_MIN} 的整数`;
+    }
+
+    const reconnectMaxMs = Number(webReconnectMaxMsInput);
+    if (
+      !Number.isInteger(reconnectMaxMs) ||
+      reconnectMaxMs < WEB_RECONNECT_MAX_MS_MIN
+    ) {
+      return `Web reconnect.maxMs 必须为 >= ${WEB_RECONNECT_MAX_MS_MIN} 的整数`;
+    }
+
+    if (reconnectMaxMs < reconnectInitialMs) {
+      return "Web reconnect.maxMs 必须 >= reconnect.initialMs";
+    }
+
+    const reconnectFactor = Number(webReconnectFactorInput);
+    if (
+      !Number.isFinite(reconnectFactor) ||
+      reconnectFactor < WEB_RECONNECT_FACTOR_MIN
+    ) {
+      return `Web reconnect.factor 必须为 >= ${WEB_RECONNECT_FACTOR_MIN} 的数字`;
+    }
+
+    const reconnectJitter = Number(webReconnectJitterInput);
+    if (
+      !Number.isFinite(reconnectJitter) ||
+      reconnectJitter < WEB_RECONNECT_JITTER_MIN ||
+      reconnectJitter > WEB_RECONNECT_JITTER_MAX
+    ) {
+      return `Web reconnect.jitter 必须在 ${WEB_RECONNECT_JITTER_MIN}~${WEB_RECONNECT_JITTER_MAX} 之间`;
+    }
+
+    const reconnectMaxAttempts = Number(webReconnectMaxAttemptsInput);
+    if (
+      !Number.isInteger(reconnectMaxAttempts) ||
+      reconnectMaxAttempts < WEB_RECONNECT_MAX_ATTEMPTS_MIN
+    ) {
+      return `Web reconnect.maxAttempts 必须为 >= ${WEB_RECONNECT_MAX_ATTEMPTS_MIN} 的整数`;
+    }
+
+    return null;
+  }, [
+    webHeartbeatInput,
+    webReconnectInitialMsInput,
+    webReconnectMaxMsInput,
+    webReconnectFactorInput,
+    webReconnectJitterInput,
+    webReconnectMaxAttemptsInput,
+  ]);
+
+  const toolsConflictHint = useMemo(() => {
+    const conflict = toolsConfig.allow.find((name) =>
+      toolsConfig.deny.includes(name)
+    );
+    if (!conflict) {
+      return null;
+    }
+    return `Tools allow/deny 冲突：${conflict} 同时存在于 allow 与 deny`;
+  }, [toolsConfig]);
+
+  const runtimeValidationHint =
+    gatewayValidationHint ||
+    messagesHistoryLimitHint ||
+    webValidationHint ||
+    toolsConflictHint;
+
   const canApplyConfig =
     hasPendingChanges &&
     previewHasChanges &&
     !applyLoading &&
     !previewLoading &&
     !rollbackLoading &&
-    !messagesHistoryLimitHint &&
+    !runtimeValidationHint &&
     (previewResult === null || previewResult.validation.valid);
 
   const applyDisabledReason = !hasPendingChanges
     ? "无配置变更"
     : !previewHasChanges
     ? "无配置变更"
-    : messagesHistoryLimitHint
-    ? messagesHistoryLimitHint
+    : runtimeValidationHint
+    ? runtimeValidationHint
     : null;
 
   const syncJsonTextFromVisual = (
@@ -1469,7 +1907,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     bindingsPayload: BindingsPayload,
     managedGateway: ManagedGatewayConfig,
     managedCommands: ManagedCommandsConfig,
-    managedMessages: ManagedMessagesConfig
+    managedMessages: ManagedMessagesConfig,
+    managedWeb: ManagedWebConfig,
+    managedTools: ManagedToolsConfig
   ) => {
     const fullConfig = await invoke<Record<string, unknown>>("get_config");
     const existingCommands = isRecord(fullConfig.commands)
@@ -1478,6 +1918,13 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     const existingMessages = isRecord(fullConfig.messages)
       ? (fullConfig.messages as Record<string, unknown>)
       : {};
+    const existingWeb = isRecord(fullConfig.web)
+      ? (fullConfig.web as Record<string, unknown>)
+      : {};
+    const existingTools = isRecord(fullConfig.tools)
+      ? (fullConfig.tools as Record<string, unknown>)
+      : {};
+
     const commandsPayload = buildCommandsPayload(managedCommands);
     const mergedCommands: Record<string, unknown> = {
       ...existingCommands,
@@ -1518,6 +1965,27 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       }
     }
 
+    const webPayload = buildWebPayload(managedWeb);
+    const reconnectPayload = isRecord(webPayload.reconnect)
+      ? (webPayload.reconnect as Record<string, unknown>)
+      : {};
+    const mergedWeb: Record<string, unknown> = {
+      ...existingWeb,
+      ...webPayload,
+      reconnect: {
+        ...(isRecord(existingWeb.reconnect)
+          ? (existingWeb.reconnect as Record<string, unknown>)
+          : {}),
+        ...reconnectPayload,
+      },
+    };
+
+    const toolsPayload = buildToolsPayload(managedTools);
+    const mergedTools: Record<string, unknown> = {
+      ...existingTools,
+      ...toolsPayload,
+    };
+
     const merged = {
       ...fullConfig,
       agents: {
@@ -1548,6 +2016,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       },
       commands: mergedCommands,
       messages: mergedMessages,
+      web: mergedWeb,
+      tools: mergedTools,
     };
     return merged as Record<string, unknown>;
   };
@@ -1564,11 +2034,15 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     normalizedGateway: ManagedGatewayConfig;
     normalizedCommands: ManagedCommandsConfig;
     normalizedMessages: ManagedMessagesConfig;
+    normalizedWeb: ManagedWebConfig;
+    normalizedTools: ManagedToolsConfig;
     bindingsPayload: BindingsPayload;
   } => {
     const normalizedGateway = normalizeManagedGateway(gatewayConfig);
     const normalizedCommands = normalizeManagedCommands(commandsConfig);
     const normalizedMessages = normalizeManagedMessages(messagesConfig);
+    const normalizedWeb = normalizeManagedWeb(webConfig);
+    const normalizedTools = normalizeManagedTools(toolsConfig);
 
     if (expertMode) {
       const parsedAgentsList = JSON.parse(agentsListText);
@@ -1590,7 +2064,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         normalizedBindings,
         normalizedGateway,
         normalizedCommands,
-        normalizedMessages
+        normalizedMessages,
+        normalizedWeb,
+        normalizedTools
       );
       if (validationError) {
         throw new Error(validationError);
@@ -1608,6 +2084,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         normalizedGateway,
         normalizedCommands,
         normalizedMessages,
+        normalizedWeb,
+        normalizedTools,
         bindingsPayload: parsedBindings,
       };
     }
@@ -1620,7 +2098,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       normalizedBindings,
       normalizedGateway,
       normalizedCommands,
-      normalizedMessages
+      normalizedMessages,
+      normalizedWeb,
+      normalizedTools
     );
     if (validationError) {
       throw new Error(validationError);
@@ -1642,6 +2122,8 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       normalizedGateway,
       normalizedCommands,
       normalizedMessages,
+      normalizedWeb,
+      normalizedTools,
       bindingsPayload,
     };
   };
@@ -1659,7 +2141,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         payload.bindingsPayload,
         payload.normalizedGateway,
         payload.normalizedCommands,
-        payload.normalizedMessages
+        payload.normalizedMessages,
+        payload.normalizedWeb,
+        payload.normalizedTools
       );
       const result = await invoke<PreviewConfigResponse>(
         "preview_config_change",
@@ -1705,7 +2189,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         payload.bindingsPayload,
         payload.normalizedGateway,
         payload.normalizedCommands,
-        payload.normalizedMessages
+        payload.normalizedMessages,
+        payload.normalizedWeb,
+        payload.normalizedTools
       );
 
       const preview = await invoke<PreviewConfigResponse>(
@@ -1760,13 +2246,33 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setMessagesHistoryLimitInput(
         String(payload.normalizedMessages.groupChatHistoryLimit)
       );
+      setWebConfig(payload.normalizedWeb);
+      setWebHeartbeatInput(String(payload.normalizedWeb.heartbeatSeconds));
+      setWebReconnectInitialMsInput(
+        String(payload.normalizedWeb.reconnect.initialMs)
+      );
+      setWebReconnectMaxMsInput(String(payload.normalizedWeb.reconnect.maxMs));
+      setWebReconnectFactorInput(
+        String(payload.normalizedWeb.reconnect.factor)
+      );
+      setWebReconnectJitterInput(
+        String(payload.normalizedWeb.reconnect.jitter)
+      );
+      setWebReconnectMaxAttemptsInput(
+        String(payload.normalizedWeb.reconnect.maxAttempts)
+      );
+      setToolsConfig(payload.normalizedTools);
+      setToolsAllowInput(payload.normalizedTools.allow.join("\n"));
+      setToolsDenyInput(payload.normalizedTools.deny.join("\n"));
       setBaselineManagedSignature(
         buildManagedConfigSignature(
           payload.normalizedAgents,
           payload.normalizedBindings,
           payload.normalizedGateway,
           payload.normalizedCommands,
-          payload.normalizedMessages
+          payload.normalizedMessages,
+          payload.normalizedWeb,
+          payload.normalizedTools
         )
       );
       setConfigMessage(
@@ -1829,8 +2335,12 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         parseBindings(bindingsResult)
       );
       const nextGatewayConfig = parseGatewayConfig(fullConfigResult);
-      const { nextCommandsConfig, nextMessagesConfig } =
-        applyRuntimeConfigSnapshot(fullConfigResult);
+      const {
+        nextCommandsConfig,
+        nextMessagesConfig,
+        nextWebConfig,
+        nextToolsConfig,
+      } = applyRuntimeConfigSnapshot(fullConfigResult);
 
       setVisualAgents(nextVisualAgents);
       setVisualBindings(nextVisualBindings);
@@ -1849,7 +2359,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           nextVisualBindings,
           nextGatewayConfig,
           nextCommandsConfig,
-          nextMessagesConfig
+          nextMessagesConfig,
+          nextWebConfig,
+          nextToolsConfig
         )
       );
       setShowRollbackDialog(false);
@@ -1982,8 +2494,12 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         const nextVisualAgents = parseAgentsList(agentsList);
         const nextVisualBindings = parsedBindings;
         const nextGatewayConfig = parseGatewayConfig(loadedFullConfig);
-        const { nextCommandsConfig, nextMessagesConfig } =
-          applyRuntimeConfigSnapshot(loadedFullConfig);
+        const {
+          nextCommandsConfig,
+          nextMessagesConfig,
+          nextWebConfig,
+          nextToolsConfig,
+        } = applyRuntimeConfigSnapshot(loadedFullConfig);
 
         setVisualAgents(nextVisualAgents);
         setVisualBindings(nextVisualBindings);
@@ -2002,7 +2518,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
             nextVisualBindings,
             nextGatewayConfig,
             nextCommandsConfig,
-            nextMessagesConfig
+            nextMessagesConfig,
+            nextWebConfig,
+            nextToolsConfig
           )
         );
 
@@ -2040,12 +2558,16 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       const nextGateway = normalizeManagedGateway(gatewayConfig);
       const nextCommands = normalizeManagedCommands(commandsConfig);
       const nextMessages = normalizeManagedMessages(messagesConfig);
+      const nextWeb = normalizeManagedWeb(webConfig);
+      const nextTools = normalizeManagedTools(toolsConfig);
       const validationError = validateVisualConfig(
         nextVisualAgents,
         nextVisualBindings,
         nextGateway,
         nextCommands,
-        nextMessages
+        nextMessages,
+        nextWeb,
+        nextTools
       );
       if (validationError) {
         throw new Error(validationError);
@@ -2062,6 +2584,16 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setCommandAllowFromInput((nextCommands.allowFromAll ?? []).join("\n"));
       setMessagesConfig(nextMessages);
       setMessagesHistoryLimitInput(String(nextMessages.groupChatHistoryLimit));
+      setWebConfig(nextWeb);
+      setWebHeartbeatInput(String(nextWeb.heartbeatSeconds));
+      setWebReconnectInitialMsInput(String(nextWeb.reconnect.initialMs));
+      setWebReconnectMaxMsInput(String(nextWeb.reconnect.maxMs));
+      setWebReconnectFactorInput(String(nextWeb.reconnect.factor));
+      setWebReconnectJitterInput(String(nextWeb.reconnect.jitter));
+      setWebReconnectMaxAttemptsInput(String(nextWeb.reconnect.maxAttempts));
+      setToolsConfig(nextTools);
+      setToolsAllowInput(nextTools.allow.join("\n"));
+      setToolsDenyInput(nextTools.deny.join("\n"));
       setExpertMode(false);
       return true;
     } catch (e) {
@@ -2369,6 +2901,122 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     }));
   };
 
+  const handleWebEnabledChange = (checked: boolean) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setWebConfig((prev) => ({
+      ...prev,
+      enabled: checked,
+    }));
+  };
+
+  const handleWebHeartbeatInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setWebHeartbeatInput(value);
+
+    const parsed = Number(value);
+    setWebConfig((prev) => ({
+      ...prev,
+      heartbeatSeconds: Number.isInteger(parsed) ? parsed : Number.NaN,
+    }));
+  };
+
+  const handleWebReconnectInitialMsInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setWebReconnectInitialMsInput(value);
+
+    const parsed = Number(value);
+    setWebConfig((prev) => ({
+      ...prev,
+      reconnect: {
+        ...prev.reconnect,
+        initialMs: Number.isInteger(parsed) ? parsed : Number.NaN,
+      },
+    }));
+  };
+
+  const handleWebReconnectMaxMsInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setWebReconnectMaxMsInput(value);
+
+    const parsed = Number(value);
+    setWebConfig((prev) => ({
+      ...prev,
+      reconnect: {
+        ...prev.reconnect,
+        maxMs: Number.isInteger(parsed) ? parsed : Number.NaN,
+      },
+    }));
+  };
+
+  const handleWebReconnectFactorInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setWebReconnectFactorInput(value);
+
+    const parsed = Number(value);
+    setWebConfig((prev) => ({
+      ...prev,
+      reconnect: {
+        ...prev.reconnect,
+        factor: Number.isFinite(parsed) ? parsed : Number.NaN,
+      },
+    }));
+  };
+
+  const handleWebReconnectJitterInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setWebReconnectJitterInput(value);
+
+    const parsed = Number(value);
+    setWebConfig((prev) => ({
+      ...prev,
+      reconnect: {
+        ...prev.reconnect,
+        jitter: Number.isFinite(parsed) ? parsed : Number.NaN,
+      },
+    }));
+  };
+
+  const handleWebReconnectMaxAttemptsInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setWebReconnectMaxAttemptsInput(value);
+
+    const parsed = Number(value);
+    setWebConfig((prev) => ({
+      ...prev,
+      reconnect: {
+        ...prev.reconnect,
+        maxAttempts: Number.isInteger(parsed) ? parsed : Number.NaN,
+      },
+    }));
+  };
+
+  const handleToolsAllowInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setToolsAllowInput(value);
+    setToolsConfig((prev) => ({
+      ...prev,
+      allow: parseToolListInput(value),
+    }));
+  };
+
+  const handleToolsDenyInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setToolsDenyInput(value);
+    setToolsConfig((prev) => ({
+      ...prev,
+      deny: parseToolListInput(value),
+    }));
+  };
+
   const handleRuntimeDocToggle = (sectionKey: RuntimeSectionKey) => {
     setRuntimeDocExpanded((prev) => ({
       ...prev,
@@ -2447,20 +3095,35 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const applyRuntimeConfigSnapshot = (fullConfig: unknown) => {
     const nextCommandsConfig = parseCommandsConfig(fullConfig);
     const nextMessagesConfig = parseMessagesConfig(fullConfig);
+    const nextWebConfig = parseWebConfig(fullConfig);
+    const nextToolsConfig = parseToolsConfig(fullConfig);
 
     setCommandsConfig(nextCommandsConfig);
     setCommandAllowFromInput(
       (nextCommandsConfig.allowFromAll ?? []).join("\n")
     );
     setMessagesConfig(nextMessagesConfig);
-
     setMessagesHistoryLimitInput(
       String(nextMessagesConfig.groupChatHistoryLimit)
     );
+    setWebConfig(nextWebConfig);
+    setWebHeartbeatInput(String(nextWebConfig.heartbeatSeconds));
+    setWebReconnectInitialMsInput(String(nextWebConfig.reconnect.initialMs));
+    setWebReconnectMaxMsInput(String(nextWebConfig.reconnect.maxMs));
+    setWebReconnectFactorInput(String(nextWebConfig.reconnect.factor));
+    setWebReconnectJitterInput(String(nextWebConfig.reconnect.jitter));
+    setWebReconnectMaxAttemptsInput(
+      String(nextWebConfig.reconnect.maxAttempts)
+    );
+    setToolsConfig(nextToolsConfig);
+    setToolsAllowInput(nextToolsConfig.allow.join("\n"));
+    setToolsDenyInput(nextToolsConfig.deny.join("\n"));
 
     return {
       nextCommandsConfig,
       nextMessagesConfig,
+      nextWebConfig,
+      nextToolsConfig,
     };
   };
 
@@ -3023,8 +3686,164 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {renderRuntimeDoc("web")}
-            {renderRuntimeDoc("tools")}
+            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+              {renderRuntimeDoc("web")}
+
+              <div className="flex items-center justify-between p-3 rounded-lg bg-dark-700/60 border border-dark-500">
+                <div>
+                  <p className="text-sm text-white">web.enabled</p>
+                  <p className="text-xs text-gray-500">
+                    控制 Runtime Web 通道启停。
+                  </p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="sr-only peer"
+                    checked={webConfig.enabled}
+                    onChange={(e) => handleWebEnabledChange(e.target.checked)}
+                  />
+                  <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  heartbeatSeconds (&gt;= {WEB_HEARTBEAT_MIN_SECONDS})
+                </label>
+                <input
+                  type="number"
+                  min={WEB_HEARTBEAT_MIN_SECONDS}
+                  value={webHeartbeatInput}
+                  onChange={(e) =>
+                    handleWebHeartbeatInputChange(e.target.value)
+                  }
+                  className="input-base"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">
+                    reconnect.initialMs
+                  </label>
+                  <input
+                    type="number"
+                    min={WEB_RECONNECT_INITIAL_MS_MIN}
+                    value={webReconnectInitialMsInput}
+                    onChange={(e) =>
+                      handleWebReconnectInitialMsInputChange(e.target.value)
+                    }
+                    className="input-base text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">
+                    reconnect.maxMs
+                  </label>
+                  <input
+                    type="number"
+                    min={WEB_RECONNECT_MAX_MS_MIN}
+                    value={webReconnectMaxMsInput}
+                    onChange={(e) =>
+                      handleWebReconnectMaxMsInputChange(e.target.value)
+                    }
+                    className="input-base text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">
+                    reconnect.factor
+                  </label>
+                  <input
+                    type="number"
+                    min={WEB_RECONNECT_FACTOR_MIN}
+                    step="0.1"
+                    value={webReconnectFactorInput}
+                    onChange={(e) =>
+                      handleWebReconnectFactorInputChange(e.target.value)
+                    }
+                    className="input-base text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">
+                    reconnect.jitter
+                  </label>
+                  <input
+                    type="number"
+                    min={WEB_RECONNECT_JITTER_MIN}
+                    max={WEB_RECONNECT_JITTER_MAX}
+                    step="0.01"
+                    value={webReconnectJitterInput}
+                    onChange={(e) =>
+                      handleWebReconnectJitterInputChange(e.target.value)
+                    }
+                    className="input-base text-sm"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-xs text-gray-400 mb-1">
+                    reconnect.maxAttempts
+                  </label>
+                  <input
+                    type="number"
+                    min={WEB_RECONNECT_MAX_ATTEMPTS_MIN}
+                    value={webReconnectMaxAttemptsInput}
+                    onChange={(e) =>
+                      handleWebReconnectMaxAttemptsInputChange(e.target.value)
+                    }
+                    className="input-base text-sm"
+                  />
+                </div>
+              </div>
+
+              <p
+                className={`text-xs ${
+                  webValidationHint ? "text-amber-300" : "text-emerald-300"
+                }`}
+              >
+                {webValidationHint ?? "Web 参数校验通过"}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+              {renderRuntimeDoc("tools")}
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  tools.allow（换行/逗号/分号分隔）
+                </label>
+                <textarea
+                  value={toolsAllowInput}
+                  onChange={(e) => handleToolsAllowInputChange(e.target.value)}
+                  rows={4}
+                  className="input-base font-mono text-xs"
+                  placeholder={"filesystem-read\nterminal-execute"}
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  tools.deny（换行/逗号/分号分隔）
+                </label>
+                <textarea
+                  value={toolsDenyInput}
+                  onChange={(e) => handleToolsDenyInputChange(e.target.value)}
+                  rows={4}
+                  className="input-base font-mono text-xs"
+                  placeholder={"shell\nrm -rf"}
+                />
+              </div>
+
+              <p
+                className={`text-xs ${
+                  toolsConflictHint ? "text-amber-300" : "text-emerald-300"
+                }`}
+              >
+                {toolsConflictHint ?? "Tools allow/deny 校验通过"}
+              </p>
+            </div>
           </div>
         </div>
       )}
