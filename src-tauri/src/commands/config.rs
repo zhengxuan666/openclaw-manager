@@ -13,6 +13,9 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 use tauri::command;
 
+const INCLUDE_DIRECTIVE_KEY: &str = "$include";
+const MAX_INCLUDE_DEPTH: usize = 10;
+
 /// 解析 openclaw 配置（JSON / JSON5）
 fn parse_openclaw_config_content(content: &str) -> Result<Value, String> {
     // 优先兼容官方 JSON5 语法（注释、尾逗号等），同时保留对标准 JSON 的兜底兼容
@@ -28,16 +31,282 @@ fn parse_openclaw_config_content(content: &str) -> Result<Value, String> {
     }
 }
 
-/// 获取 openclaw.json 原始配置（不做变量替换，用于写回场景）
-fn load_openclaw_config_raw() -> Result<Value, String> {
-    let config_path = platform::get_config_file_path();
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
 
-    if !file::file_exists(&config_path) {
+fn deep_merge_json(target: &mut Value, source: Value) {
+    match (target, source) {
+        (Value::Object(target_map), Value::Object(source_map)) => {
+            for (key, source_value) in source_map {
+                if let Some(existing) = target_map.get_mut(&key) {
+                    deep_merge_json(existing, source_value);
+                } else {
+                    target_map.insert(key, source_value);
+                }
+            }
+        }
+        (target_value, source_value) => {
+            *target_value = source_value;
+        }
+    }
+}
+
+fn parse_include_entries(include_value: &Value, current_file: &PathBuf) -> Result<Vec<String>, String> {
+    match include_value {
+        Value::String(path) => {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Err(format!(
+                    "include 配置无效：路径不能为空（来源文件: {}）",
+                    current_file.display()
+                ));
+            }
+            Ok(vec![trimmed.to_string()])
+        }
+        Value::Array(items) => {
+            let mut paths = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let Value::String(path) = item else {
+                    return Err(format!(
+                        "include 配置无效：数组第 {} 项必须为字符串（来源文件: {}）",
+                        index,
+                        current_file.display()
+                    ));
+                };
+
+                let trimmed = path.trim();
+                if trimmed.is_empty() {
+                    return Err(format!(
+                        "include 配置无效：数组第 {} 项路径不能为空（来源文件: {}）",
+                        index,
+                        current_file.display()
+                    ));
+                }
+                paths.push(trimmed.to_string());
+            }
+            Ok(paths)
+        }
+        _ => Err(format!(
+            "include 配置无效：必须是字符串或字符串数组（来源文件: {}）",
+            current_file.display()
+        )),
+    }
+}
+
+fn resolve_include_path(
+    include_path: &str,
+    current_file: &PathBuf,
+    config_root: &PathBuf,
+) -> Result<PathBuf, String> {
+    let requested = PathBuf::from(include_path);
+    let resolved = if requested.is_absolute() {
+        requested
+    } else {
+        current_file
+            .parent()
+            .unwrap_or(config_root.as_path())
+            .join(requested)
+    };
+
+    if !resolved.exists() {
+        return Err(format!(
+            "include 文件不存在: {}（来源文件: {}）",
+            resolved.display(),
+            current_file.display()
+        ));
+    }
+
+    if !resolved.is_file() {
+        return Err(format!(
+            "include 路径不是文件: {}（来源文件: {}）",
+            resolved.display(),
+            current_file.display()
+        ));
+    }
+
+    let canonical = fs::canonicalize(&resolved).map_err(|e| {
+        format!(
+            "解析 include 路径失败: {}（来源文件: {}，错误: {}）",
+            resolved.display(),
+            current_file.display(),
+            e
+        )
+    })?;
+
+    if !canonical.starts_with(config_root) {
+        return Err(format!(
+            "include 路径越界: {}（来源文件: {}，配置根目录: {}）",
+            canonical.display(),
+            current_file.display(),
+            config_root.display()
+        ));
+    }
+
+    Ok(canonical)
+}
+
+fn format_include_cycle(chain: &[PathBuf], next: &PathBuf) -> String {
+    let mut items: Vec<String> = chain.iter().map(|p| p.display().to_string()).collect();
+    items.push(next.display().to_string());
+    items.join(" -> ")
+}
+
+fn expand_includes(
+    value: Value,
+    current_file: &PathBuf,
+    config_root: &PathBuf,
+    include_chain: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<Value, String> {
+    match value {
+        Value::Object(mut map) => {
+            if let Some(include_value) = map.remove(INCLUDE_DIRECTIVE_KEY) {
+                if depth > MAX_INCLUDE_DEPTH {
+                    return Err(format!(
+                        "include 嵌套深度超过限制（最大 {}）: {}",
+                        MAX_INCLUDE_DEPTH,
+                        current_file.display()
+                    ));
+                }
+
+                let include_entries = parse_include_entries(&include_value, current_file)?;
+                let mut merged = Value::Object(serde_json::Map::new());
+
+                for include_entry in include_entries {
+                    let include_file = resolve_include_path(&include_entry, current_file, config_root)?;
+                    if include_chain.iter().any(|path| path == &include_file) {
+                        return Err(format!(
+                            "检测到 include 循环引用: {}",
+                            format_include_cycle(include_chain, &include_file)
+                        ));
+                    }
+
+                    include_chain.push(include_file.clone());
+                    let include_content = file::read_file(include_file.to_string_lossy().as_ref())
+                        .map_err(|e| {
+                            format!("读取 include 文件失败: {}（{}）", e, include_file.display())
+                        })?;
+
+                    let include_parsed = parse_openclaw_config_content(&include_content).map_err(|e| {
+                        format!("include 文件解析失败: {}（{}）", e, include_file.display())
+                    })?;
+
+                    let include_expanded = match expand_includes(
+                        include_parsed,
+                        &include_file,
+                        config_root,
+                        include_chain,
+                        depth + 1,
+                    ) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            include_chain.pop();
+                            return Err(err);
+                        }
+                    };
+                    include_chain.pop();
+
+                    if !include_expanded.is_object() {
+                        return Err(format!(
+                            "include 文件内容必须是对象: {}（实际: {}）",
+                            include_file.display(),
+                            value_type_name(&include_expanded)
+                        ));
+                    }
+
+                    deep_merge_json(&mut merged, include_expanded);
+                }
+
+                let mut merged_map = match merged {
+                    Value::Object(obj) => obj,
+                    _ => serde_json::Map::new(),
+                };
+
+                for (key, sibling_value) in map {
+                    let resolved_sibling =
+                        expand_includes(sibling_value, current_file, config_root, include_chain, depth)?;
+                    if let Some(existing) = merged_map.get_mut(&key) {
+                        deep_merge_json(existing, resolved_sibling);
+                    } else {
+                        merged_map.insert(key, resolved_sibling);
+                    }
+                }
+
+                Ok(Value::Object(merged_map))
+            } else {
+                let mut resolved_map = serde_json::Map::with_capacity(map.len());
+                for (key, child) in map {
+                    let resolved_child =
+                        expand_includes(child, current_file, config_root, include_chain, depth)?;
+                    resolved_map.insert(key, resolved_child);
+                }
+                Ok(Value::Object(resolved_map))
+            }
+        }
+        Value::Array(arr) => {
+            let mut resolved = Vec::with_capacity(arr.len());
+            for child in arr {
+                resolved.push(expand_includes(
+                    child,
+                    current_file,
+                    config_root,
+                    include_chain,
+                    depth,
+                )?);
+            }
+            Ok(Value::Array(resolved))
+        }
+        _ => Ok(value),
+    }
+}
+
+/// 获取 openclaw.json 配置（展开 $include，不做变量替换）
+fn load_openclaw_config_raw() -> Result<Value, String> {
+    let config_path = PathBuf::from(platform::get_config_file_path());
+
+    if !file::file_exists(config_path.to_string_lossy().as_ref()) {
         return Ok(json!({}));
     }
 
-    let content = file::read_file(&config_path).map_err(|e| format!("读取配置文件失败: {}", e))?;
-    parse_openclaw_config_content(&content)
+    let config_root = PathBuf::from(platform::get_config_dir());
+    let canonical_root = fs::canonicalize(&config_root).map_err(|e| {
+        format!(
+            "解析配置目录失败: {}（错误: {}）",
+            config_root.display(),
+            e
+        )
+    })?;
+
+    let canonical_config = fs::canonicalize(&config_path).map_err(|e| {
+        format!(
+            "解析主配置文件路径失败: {}（错误: {}）",
+            config_path.display(),
+            e
+        )
+    })?;
+
+    if !canonical_config.starts_with(&canonical_root) {
+        return Err(format!(
+            "主配置文件越界: {}（配置根目录: {}）",
+            canonical_config.display(),
+            canonical_root.display()
+        ));
+    }
+
+    let content = file::read_file(canonical_config.to_string_lossy().as_ref())
+        .map_err(|e| format!("读取配置文件失败: {}", e))?;
+    let parsed = parse_openclaw_config_content(&content)?;
+
+    let mut include_chain = vec![canonical_config.clone()];
+    expand_includes(parsed, &canonical_config, &canonical_root, &mut include_chain, 0)
 }
 
 /// 读取 ~/.openclaw/env 环境变量
@@ -2229,9 +2498,9 @@ pub async fn install_feishu_plugin() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_config_diff_summary, load_env_file_vars, normalize_and_validate_config,
-        parse_openclaw_config_content,
-        replace_config_vars, save_openclaw_config,
+        build_config_diff_summary, load_env_file_vars, load_openclaw_config_raw,
+        normalize_and_validate_config, parse_openclaw_config_content, replace_config_vars,
+        save_openclaw_config,
     };
     use crate::utils::{file as file_utils, platform as platform_utils};
     use serde_json::{json, Value};
@@ -2316,6 +2585,26 @@ mod tests {
                 previous_home,
                 temp_home_dir,
             }
+        }
+
+        fn openclaw_dir(&self) -> PathBuf {
+            self.temp_home_dir.join(".openclaw")
+        }
+
+        fn openclaw_file_path(&self, relative_path: &str) -> PathBuf {
+            self.openclaw_dir().join(relative_path)
+        }
+
+        fn write_openclaw_file(&self, relative_path: &str, content: &str) {
+            let target = self.openclaw_file_path(relative_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).expect("应可创建 include 文件父目录");
+            }
+            fs::write(target, content).expect("应可写入 include 文件");
+        }
+
+        fn write_openclaw_config(&self, content: &str) {
+            self.write_openclaw_file("openclaw.json", content);
         }
 
         fn write_openclaw_env(&self, content: &str) {
@@ -2439,6 +2728,292 @@ mod tests {
                 .pointer("/channels/telegram/accounts/0/token")
                 .and_then(|v| v.as_str()),
             Some("tg-token")
+        );
+    }
+
+    #[test]
+    fn include_single_file_should_work() {
+        let _env_lock = test_env_lock();
+        let home_guard = TempHomeGuard::new();
+        home_guard.write_openclaw_file(
+            "providers/base.json5",
+            r#"
+            {
+              models: {
+                providers: {
+                  anthropic: {
+                    baseUrl: "https://api.anthropic.com",
+                    apiKey: "from-base",
+                  },
+                },
+              },
+            }
+            "#,
+        );
+        home_guard.write_openclaw_config(
+            r#"
+            {
+              "$include": "providers/base.json5"
+            }
+            "#,
+        );
+
+        let expanded = load_openclaw_config_raw().expect("单文件 include 应可解析");
+        assert_eq!(
+            expanded
+                .pointer("/models/providers/anthropic/baseUrl")
+                .and_then(|v| v.as_str()),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(
+            expanded
+                .pointer("/models/providers/anthropic/apiKey")
+                .and_then(|v| v.as_str()),
+            Some("from-base")
+        );
+    }
+
+    #[test]
+    fn include_multiple_files_should_merge_in_order() {
+        let _env_lock = test_env_lock();
+        let home_guard = TempHomeGuard::new();
+        home_guard.write_openclaw_file(
+            "providers/base.json5",
+            r#"
+            {
+              models: {
+                providers: {
+                  anthropic: {
+                    baseUrl: "https://api.anthropic.com",
+                    apiKey: "base-key",
+                  },
+                },
+              },
+            }
+            "#,
+        );
+        home_guard.write_openclaw_file(
+            "providers/override.json5",
+            r#"
+            {
+              models: {
+                providers: {
+                  anthropic: {
+                    apiKey: "override-key",
+                  },
+                },
+              },
+            }
+            "#,
+        );
+        home_guard.write_openclaw_config(
+            r#"
+            {
+              "$include": ["providers/base.json5", "providers/override.json5"]
+            }
+            "#,
+        );
+
+        let expanded = load_openclaw_config_raw().expect("多文件 include 应可解析");
+        assert_eq!(
+            expanded
+                .pointer("/models/providers/anthropic/baseUrl")
+                .and_then(|v| v.as_str()),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(
+            expanded
+                .pointer("/models/providers/anthropic/apiKey")
+                .and_then(|v| v.as_str()),
+            Some("override-key")
+        );
+    }
+
+    #[test]
+    fn include_nested_should_work() {
+        let _env_lock = test_env_lock();
+        let home_guard = TempHomeGuard::new();
+        home_guard.write_openclaw_file(
+            "providers/base.json5",
+            r#"
+            {
+              models: {
+                providers: {
+                  anthropic: {
+                    baseUrl: "https://api.anthropic.com",
+                  },
+                },
+              },
+            }
+            "#,
+        );
+        home_guard.write_openclaw_file(
+            "providers/middle.json5",
+            r#"
+            {
+              "$include": "base.json5",
+              models: {
+                providers: {
+                  anthropic: {
+                    apiKey: "middle-key",
+                  },
+                },
+              },
+            }
+            "#,
+        );
+        home_guard.write_openclaw_config(
+            r#"
+            {
+              "$include": "providers/middle.json5"
+            }
+            "#,
+        );
+
+        let expanded = load_openclaw_config_raw().expect("嵌套 include 应可解析");
+        assert_eq!(
+            expanded
+                .pointer("/models/providers/anthropic/baseUrl")
+                .and_then(|v| v.as_str()),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(
+            expanded
+                .pointer("/models/providers/anthropic/apiKey")
+                .and_then(|v| v.as_str()),
+            Some("middle-key")
+        );
+    }
+
+    #[test]
+    fn sibling_fields_should_override_include_result() {
+        let _env_lock = test_env_lock();
+        let home_guard = TempHomeGuard::new();
+        home_guard.write_openclaw_file(
+            "providers/base.json5",
+            r#"
+            {
+              models: {
+                providers: {
+                  anthropic: {
+                    baseUrl: "https://api.anthropic.com",
+                    apiKey: "base-key",
+                  },
+                },
+              },
+            }
+            "#,
+        );
+        home_guard.write_openclaw_config(
+            r#"
+            {
+              models: {
+                "$include": "providers/base.json5",
+                providers: {
+                  anthropic: {
+                    apiKey: "sibling-key",
+                  },
+                },
+              },
+            }
+            "#,
+        );
+
+        let expanded = load_openclaw_config_raw().expect("sibling override 应可解析");
+        assert_eq!(
+            expanded
+                .pointer("/models/providers/anthropic/baseUrl")
+                .and_then(|v| v.as_str()),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(
+            expanded
+                .pointer("/models/providers/anthropic/apiKey")
+                .and_then(|v| v.as_str()),
+            Some("sibling-key")
+        );
+    }
+
+    #[test]
+    fn include_cycle_should_return_error() {
+        let _env_lock = test_env_lock();
+        let home_guard = TempHomeGuard::new();
+        home_guard.write_openclaw_file("cycle/a.json5", r#"{ "$include": "b.json5" }"#);
+        home_guard.write_openclaw_file("cycle/b.json5", r#"{ "$include": "a.json5" }"#);
+        home_guard.write_openclaw_config(r#"{ "$include": "cycle/a.json5" }"#);
+
+        let err = load_openclaw_config_raw().expect_err("循环 include 应返回错误");
+        assert!(
+            err.contains("循环引用"),
+            "错误信息应包含循环引用提示，实际: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn include_missing_file_should_return_error() {
+        let _env_lock = test_env_lock();
+        let home_guard = TempHomeGuard::new();
+        home_guard.write_openclaw_config(r#"{ "$include": "providers/not-exist.json5" }"#);
+
+        let err = load_openclaw_config_raw().expect_err("缺失 include 文件应返回错误");
+        assert!(
+            err.contains("不存在"),
+            "错误信息应包含文件不存在提示，实际: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn include_parse_error_should_return_error() {
+        let _env_lock = test_env_lock();
+        let home_guard = TempHomeGuard::new();
+        home_guard.write_openclaw_file("providers/bad.json5", "{ token: }");
+        home_guard.write_openclaw_config(r#"{ "$include": "providers/bad.json5" }"#);
+
+        let err = load_openclaw_config_raw().expect_err("include 解析失败应返回错误");
+        assert!(
+            err.contains("include 文件解析失败"),
+            "错误信息应包含 include 解析失败提示，实际: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn include_depth_limit_should_return_error() {
+        let _env_lock = test_env_lock();
+        let home_guard = TempHomeGuard::new();
+
+        for idx in 0..=10 {
+            home_guard.write_openclaw_file(
+                format!("chain/level{}.json5", idx).as_str(),
+                format!("{{ \"$include\": \"level{}.json5\" }}", idx + 1).as_str(),
+            );
+        }
+        home_guard.write_openclaw_file("chain/level11.json5", "{}");
+        home_guard.write_openclaw_config(r#"{ "$include": "chain/level0.json5" }"#);
+
+        let err = load_openclaw_config_raw().expect_err("超过 include 深度限制应返回错误");
+        assert!(
+            err.contains("嵌套深度超过限制"),
+            "错误信息应包含深度限制提示，实际: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn include_out_of_config_root_should_return_error() {
+        let _env_lock = test_env_lock();
+        let home_guard = TempHomeGuard::new();
+        let outside = home_guard.temp_home_dir.join("outside-target.json5");
+        fs::write(&outside, r#"{ "ok": true }"#).expect("应可写入越界 include 目标文件");
+        home_guard.write_openclaw_config(r#"{ "$include": "../outside-target.json5" }"#);
+
+        let err = load_openclaw_config_raw().expect_err("越界 include 应返回错误");
+        assert!(
+            err.contains("路径越界"),
+            "错误信息应包含越界提示，实际: {}",
+            err
         );
     }
 
