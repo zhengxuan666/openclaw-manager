@@ -153,14 +153,51 @@ interface ManagedWebConfig {
   reconnect: ManagedWebReconnectConfig;
 }
 
+type SessionsVisibility = "self" | "tree" | "agent" | "all";
+
 interface ManagedToolsConfig {
   allow: string[];
   deny: string[];
+  sessionsVisibility: SessionsVisibility;
+}
+
+interface ManagedHeartbeatConfig {
+  every: string;
+  model: string;
+  includeReasoning: boolean;
+  target: string;
+  prompt: string;
+  ackMaxChars: number;
+  suppressToolErrorWarnings: boolean;
+}
+
+interface ManagedCronConfig {
+  enabled: boolean;
+  maxConcurrentRuns: number;
+  sessionRetention: string | false;
+  webhook: string;
+  webhookToken: string;
+}
+
+interface ManagedHooksConfig {
+  enabled: boolean;
+  token: string;
+  path: string;
+  maxBodyBytes: number;
+  allowRequestSessionKey: boolean;
 }
 
 type ConfigCenterView = "general" | "center";
 type ConfigCenterTab = "agent" | "routing" | "runtime" | "advanced";
-type RuntimeSectionKey = "commands" | "messages" | "web" | "tools";
+type RuntimeSectionKey =
+  | "commands"
+  | "messages"
+  | "web"
+  | "tools"
+  | "heartbeat"
+  | "cron"
+  | "hooks"
+  | "sessions";
 type RuntimeStatus = "connected" | "planned";
 
 interface RuntimeFieldDoc {
@@ -325,6 +362,136 @@ const RUNTIME_SECTION_DOCS: RuntimeSectionDoc[] = [
     ],
     riskTip: "allow/deny 冲突会导致配置不可应用，请保持清晰单一策略。",
   },
+  {
+    key: "heartbeat",
+    title: "Heartbeat",
+    status: "connected",
+    functionDescription:
+      "管理 agents.defaults.heartbeat，控制心跳频率、目标与心跳消息内容。",
+    fields: [
+      {
+        name: "agents.defaults.heartbeat.every",
+        description: "心跳周期（duration）。",
+        defaultHint: "5m",
+      },
+      {
+        name: "agents.defaults.heartbeat.model",
+        description: "执行心跳时使用的模型标识。",
+        defaultHint: "空字符串（保持现有策略）",
+      },
+      {
+        name: "agents.defaults.heartbeat.includeReasoning",
+        description: "是否在心跳中包含 reasoning。",
+        defaultHint: "false",
+      },
+      {
+        name: "agents.defaults.heartbeat.target",
+        description:
+          "心跳目标（last / none / whatsapp / telegram / discord ...）。",
+        defaultHint: "last",
+      },
+      {
+        name: "agents.defaults.heartbeat.prompt",
+        description: "心跳提示词（多行文本）。",
+        defaultHint: "空",
+      },
+      {
+        name: "agents.defaults.heartbeat.ackMaxChars",
+        description: "心跳确认消息最大字符数。",
+        defaultHint: "120",
+      },
+      {
+        name: "agents.defaults.heartbeat.suppressToolErrorWarnings",
+        description: "是否抑制工具错误告警。",
+        defaultHint: "false",
+      },
+    ],
+    riskTip: "心跳频率过高或目标配置不当，可能导致额外消耗与告警噪音。",
+  },
+  {
+    key: "cron",
+    title: "Cron",
+    status: "connected",
+    functionDescription:
+      "管理 cron 调度基础策略，包括并发、会话保留与回调通知。",
+    fields: [
+      {
+        name: "cron.enabled",
+        description: "是否启用 cron。",
+        defaultHint: "false",
+      },
+      {
+        name: "cron.maxConcurrentRuns",
+        description: "最大并发运行数（>= 1）。",
+        defaultHint: "1",
+      },
+      {
+        name: "cron.sessionRetention",
+        description: "会话保留时长（duration）或 false。",
+        defaultHint: "false",
+      },
+      {
+        name: "cron.webhook",
+        description: "任务回调 webhook URL，可为空。",
+        defaultHint: "空",
+      },
+      {
+        name: "cron.webhookToken",
+        description: "webhook 鉴权 token，可为空。",
+        defaultHint: "空",
+      },
+    ],
+    riskTip: "并发或 webhook 配置错误可能导致调度堆积与回调失败。",
+  },
+  {
+    key: "sessions",
+    title: "Sessions Visibility",
+    status: "connected",
+    functionDescription:
+      "管理 tools.sessions.visibility，可视化控制会话可见范围。",
+    fields: [
+      {
+        name: "tools.sessions.visibility",
+        description: "会话可见性：self / tree / agent / all。",
+        defaultHint: "self",
+      },
+    ],
+    riskTip: "可见性范围越大，跨会话信息暴露面越大。",
+  },
+  {
+    key: "hooks",
+    title: "Hooks",
+    status: "connected",
+    functionDescription: "管理 hooks 基础入口参数，用于接收外部回调请求。",
+    fields: [
+      {
+        name: "hooks.enabled",
+        description: "是否启用 hooks 服务。",
+        defaultHint: "false",
+      },
+      {
+        name: "hooks.token",
+        description: "hooks 鉴权 token（密码）。",
+        defaultHint: "空",
+      },
+      {
+        name: "hooks.path",
+        description: "hooks 路径，默认 /hooks。",
+        defaultHint: "/hooks",
+      },
+      {
+        name: "hooks.maxBodyBytes",
+        description: "请求体大小限制（字节）。",
+        defaultHint: "1048576",
+      },
+      {
+        name: "hooks.allowRequestSessionKey",
+        description: "是否允许请求中覆盖 session key。",
+        defaultHint: "false",
+      },
+    ],
+    riskTip: "hooks 对外暴露能力较强，务必配合 token 与最小权限策略。",
+  },
 ];
 
 const RUNTIME_SECTION_DOC_MAP: Record<RuntimeSectionKey, RuntimeSectionDoc> =
@@ -401,6 +568,9 @@ const WEB_RECONNECT_FACTOR_MIN = 1;
 const WEB_RECONNECT_JITTER_MIN = 0;
 const WEB_RECONNECT_JITTER_MAX = 1;
 const WEB_RECONNECT_MAX_ATTEMPTS_MIN = 0;
+const HEARTBEAT_ACK_MAX_CHARS_MIN = 0;
+const CRON_MAX_CONCURRENT_RUNS_MIN = 1;
+const HOOKS_MAX_BODY_BYTES_MIN = 1;
 const TOOL_LIST_SPLIT_PATTERN = /[\r\n,，;；]+/;
 
 const DEFAULT_GATEWAY_CONFIG: ManagedGatewayConfig = {
@@ -427,6 +597,30 @@ const DEFAULT_WEB_CONFIG: ManagedWebConfig = {
 const DEFAULT_TOOLS_CONFIG: ManagedToolsConfig = {
   allow: [],
   deny: [],
+  sessionsVisibility: "self",
+};
+const DEFAULT_HEARTBEAT_CONFIG: ManagedHeartbeatConfig = {
+  every: "5m",
+  model: "",
+  includeReasoning: false,
+  target: "last",
+  prompt: "",
+  ackMaxChars: 120,
+  suppressToolErrorWarnings: false,
+};
+const DEFAULT_CRON_CONFIG: ManagedCronConfig = {
+  enabled: false,
+  maxConcurrentRuns: 1,
+  sessionRetention: false,
+  webhook: "",
+  webhookToken: "",
+};
+const DEFAULT_HOOKS_CONFIG: ManagedHooksConfig = {
+  enabled: false,
+  token: "",
+  path: "/hooks",
+  maxBodyBytes: 1024 * 1024,
+  allowRequestSessionKey: false,
 };
 
 const GATEWAY_RELOAD_MODE_OPTIONS: Array<{
@@ -1024,6 +1218,35 @@ function parseToolListInput(value: string): string[] {
   return parseToolNameList(value);
 }
 
+function parseOptionalString(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  return undefined;
+}
+
+function parseDurationOrFalse(value: unknown): string | false | undefined {
+  if (value === false) {
+    return false;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  return undefined;
+}
+
+function normalizeDurationOrFalse(value: unknown): string | false {
+  if (value === false) {
+    return false;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : false;
+  }
+  return false;
+}
+
 function parseIntegerFromUnknown(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.trunc(value);
@@ -1239,17 +1462,178 @@ function parseToolsConfig(config: unknown): ManagedToolsConfig {
   }
 
   const tools = config.tools;
+  const sessions = isRecord(tools.sessions) ? tools.sessions : {};
 
   return {
     allow: parseToolNameList(tools.allow),
     deny: parseToolNameList(tools.deny),
+    sessionsVisibility:
+      sessions.visibility === "self" ||
+      sessions.visibility === "tree" ||
+      sessions.visibility === "agent" ||
+      sessions.visibility === "all"
+        ? sessions.visibility
+        : DEFAULT_TOOLS_CONFIG.sessionsVisibility,
   };
 }
 
 function normalizeManagedTools(tools: ManagedToolsConfig): ManagedToolsConfig {
+  const sessionsVisibility =
+    tools.sessionsVisibility === "self" ||
+    tools.sessionsVisibility === "tree" ||
+    tools.sessionsVisibility === "agent" ||
+    tools.sessionsVisibility === "all"
+      ? tools.sessionsVisibility
+      : DEFAULT_TOOLS_CONFIG.sessionsVisibility;
+
   return {
     allow: parseToolNameList(tools.allow),
     deny: parseToolNameList(tools.deny),
+    sessionsVisibility,
+  };
+}
+
+function parseHeartbeatConfig(config: unknown): ManagedHeartbeatConfig {
+  const heartbeat = isRecord(config)
+    ? isRecord(config.agents)
+      ? isRecord(config.agents.defaults)
+        ? isRecord(config.agents.defaults.heartbeat)
+          ? config.agents.defaults.heartbeat
+          : undefined
+        : undefined
+      : undefined
+    : undefined;
+
+  if (!heartbeat) {
+    return { ...DEFAULT_HEARTBEAT_CONFIG };
+  }
+
+  const ackMaxChars = parseIntegerFromUnknown(heartbeat.ackMaxChars);
+
+  return {
+    every:
+      parseOptionalString(heartbeat.every) ?? DEFAULT_HEARTBEAT_CONFIG.every,
+    model:
+      parseOptionalString(heartbeat.model) ?? DEFAULT_HEARTBEAT_CONFIG.model,
+    includeReasoning:
+      typeof heartbeat.includeReasoning === "boolean"
+        ? heartbeat.includeReasoning
+        : DEFAULT_HEARTBEAT_CONFIG.includeReasoning,
+    target:
+      parseOptionalString(heartbeat.target) ?? DEFAULT_HEARTBEAT_CONFIG.target,
+    prompt:
+      parseOptionalString(heartbeat.prompt) ?? DEFAULT_HEARTBEAT_CONFIG.prompt,
+    ackMaxChars:
+      ackMaxChars !== undefined && ackMaxChars >= HEARTBEAT_ACK_MAX_CHARS_MIN
+        ? ackMaxChars
+        : DEFAULT_HEARTBEAT_CONFIG.ackMaxChars,
+    suppressToolErrorWarnings:
+      typeof heartbeat.suppressToolErrorWarnings === "boolean"
+        ? heartbeat.suppressToolErrorWarnings
+        : DEFAULT_HEARTBEAT_CONFIG.suppressToolErrorWarnings,
+  };
+}
+
+function normalizeManagedHeartbeat(
+  heartbeat: ManagedHeartbeatConfig
+): ManagedHeartbeatConfig {
+  const ackMaxChars = Number.isFinite(heartbeat.ackMaxChars)
+    ? Math.max(HEARTBEAT_ACK_MAX_CHARS_MIN, Math.trunc(heartbeat.ackMaxChars))
+    : DEFAULT_HEARTBEAT_CONFIG.ackMaxChars;
+
+  return {
+    every: heartbeat.every.trim(),
+    model: heartbeat.model.trim(),
+    includeReasoning: Boolean(heartbeat.includeReasoning),
+    target: heartbeat.target.trim(),
+    prompt: heartbeat.prompt,
+    ackMaxChars,
+    suppressToolErrorWarnings: Boolean(heartbeat.suppressToolErrorWarnings),
+  };
+}
+
+function parseCronConfig(config: unknown): ManagedCronConfig {
+  if (!isRecord(config) || !isRecord(config.cron)) {
+    return { ...DEFAULT_CRON_CONFIG };
+  }
+
+  const cron = config.cron;
+  const maxConcurrentRuns = parseIntegerFromUnknown(cron.maxConcurrentRuns);
+  const sessionRetention = parseDurationOrFalse(cron.sessionRetention);
+
+  return {
+    enabled:
+      typeof cron.enabled === "boolean"
+        ? cron.enabled
+        : DEFAULT_CRON_CONFIG.enabled,
+    maxConcurrentRuns:
+      maxConcurrentRuns !== undefined &&
+      maxConcurrentRuns >= CRON_MAX_CONCURRENT_RUNS_MIN
+        ? maxConcurrentRuns
+        : DEFAULT_CRON_CONFIG.maxConcurrentRuns,
+    sessionRetention:
+      sessionRetention !== undefined
+        ? sessionRetention
+        : DEFAULT_CRON_CONFIG.sessionRetention,
+    webhook: parseOptionalString(cron.webhook) ?? DEFAULT_CRON_CONFIG.webhook,
+    webhookToken:
+      parseOptionalString(cron.webhookToken) ??
+      DEFAULT_CRON_CONFIG.webhookToken,
+  };
+}
+
+function normalizeManagedCron(cron: ManagedCronConfig): ManagedCronConfig {
+  const maxConcurrentRuns = Number.isFinite(cron.maxConcurrentRuns)
+    ? Math.max(CRON_MAX_CONCURRENT_RUNS_MIN, Math.trunc(cron.maxConcurrentRuns))
+    : DEFAULT_CRON_CONFIG.maxConcurrentRuns;
+
+  return {
+    enabled: Boolean(cron.enabled),
+    maxConcurrentRuns,
+    sessionRetention: normalizeDurationOrFalse(cron.sessionRetention),
+    webhook: cron.webhook.trim(),
+    webhookToken: cron.webhookToken,
+  };
+}
+
+function parseHooksConfig(config: unknown): ManagedHooksConfig {
+  if (!isRecord(config) || !isRecord(config.hooks)) {
+    return { ...DEFAULT_HOOKS_CONFIG };
+  }
+
+  const hooks = config.hooks;
+  const maxBodyBytes = parseIntegerFromUnknown(hooks.maxBodyBytes);
+  const path = parseOptionalString(hooks.path);
+
+  return {
+    enabled:
+      typeof hooks.enabled === "boolean"
+        ? hooks.enabled
+        : DEFAULT_HOOKS_CONFIG.enabled,
+    token: parseOptionalString(hooks.token) ?? DEFAULT_HOOKS_CONFIG.token,
+    path: path && path.trim() ? path.trim() : DEFAULT_HOOKS_CONFIG.path,
+    maxBodyBytes:
+      maxBodyBytes !== undefined && maxBodyBytes >= HOOKS_MAX_BODY_BYTES_MIN
+        ? maxBodyBytes
+        : DEFAULT_HOOKS_CONFIG.maxBodyBytes,
+    allowRequestSessionKey:
+      typeof hooks.allowRequestSessionKey === "boolean"
+        ? hooks.allowRequestSessionKey
+        : DEFAULT_HOOKS_CONFIG.allowRequestSessionKey,
+  };
+}
+
+function normalizeManagedHooks(hooks: ManagedHooksConfig): ManagedHooksConfig {
+  const maxBodyBytes = Number.isFinite(hooks.maxBodyBytes)
+    ? Math.max(HOOKS_MAX_BODY_BYTES_MIN, Math.trunc(hooks.maxBodyBytes))
+    : DEFAULT_HOOKS_CONFIG.maxBodyBytes;
+
+  return {
+    enabled: Boolean(hooks.enabled),
+    token: hooks.token,
+    path: hooks.path.trim() || DEFAULT_HOOKS_CONFIG.path,
+    maxBodyBytes,
+    allowRequestSessionKey: Boolean(hooks.allowRequestSessionKey),
   };
 }
 
@@ -1273,6 +1657,46 @@ function buildToolsPayload(tools: ManagedToolsConfig): Record<string, unknown> {
   return {
     allow: normalized.allow,
     deny: normalized.deny,
+    sessions: {
+      visibility: normalized.sessionsVisibility,
+    },
+  };
+}
+
+function buildHeartbeatPayload(
+  heartbeat: ManagedHeartbeatConfig
+): Record<string, unknown> {
+  const normalized = normalizeManagedHeartbeat(heartbeat);
+  return {
+    every: normalized.every,
+    model: normalized.model,
+    includeReasoning: normalized.includeReasoning,
+    target: normalized.target,
+    prompt: normalized.prompt,
+    ackMaxChars: normalized.ackMaxChars,
+    suppressToolErrorWarnings: normalized.suppressToolErrorWarnings,
+  };
+}
+
+function buildCronPayload(cron: ManagedCronConfig): Record<string, unknown> {
+  const normalized = normalizeManagedCron(cron);
+  return {
+    enabled: normalized.enabled,
+    maxConcurrentRuns: normalized.maxConcurrentRuns,
+    sessionRetention: normalized.sessionRetention,
+    webhook: normalized.webhook,
+    webhookToken: normalized.webhookToken,
+  };
+}
+
+function buildHooksPayload(hooks: ManagedHooksConfig): Record<string, unknown> {
+  const normalized = normalizeManagedHooks(hooks);
+  return {
+    enabled: normalized.enabled,
+    token: normalized.token,
+    path: normalized.path,
+    maxBodyBytes: normalized.maxBodyBytes,
+    allowRequestSessionKey: normalized.allowRequestSessionKey,
   };
 }
 
@@ -1351,7 +1775,10 @@ function normalizeVisualConfig(
   commands: ManagedCommandsConfig,
   messages: ManagedMessagesConfig,
   web: ManagedWebConfig,
-  tools: ManagedToolsConfig
+  tools: ManagedToolsConfig,
+  heartbeat: ManagedHeartbeatConfig,
+  cron: ManagedCronConfig,
+  hooks: ManagedHooksConfig
 ): {
   agents: VisualAgent[];
   bindings: VisualBinding[];
@@ -1360,6 +1787,9 @@ function normalizeVisualConfig(
   messages: ManagedMessagesConfig;
   web: ManagedWebConfig;
   tools: ManagedToolsConfig;
+  heartbeat: ManagedHeartbeatConfig;
+  cron: ManagedCronConfig;
+  hooks: ManagedHooksConfig;
 } {
   return {
     agents: normalizeVisualAgents(agents),
@@ -1369,6 +1799,9 @@ function normalizeVisualConfig(
     messages: normalizeManagedMessages(messages),
     web: normalizeManagedWeb(web),
     tools: normalizeManagedTools(tools),
+    heartbeat: normalizeManagedHeartbeat(heartbeat),
+    cron: normalizeManagedCron(cron),
+    hooks: normalizeManagedHooks(hooks),
   };
 }
 
@@ -1379,7 +1812,10 @@ function buildManagedConfigSignature(
   commands: ManagedCommandsConfig,
   messages: ManagedMessagesConfig,
   web: ManagedWebConfig,
-  tools: ManagedToolsConfig
+  tools: ManagedToolsConfig,
+  heartbeat: ManagedHeartbeatConfig,
+  cron: ManagedCronConfig,
+  hooks: ManagedHooksConfig
 ): string {
   const normalized = normalizeVisualConfig(
     agents,
@@ -1388,7 +1824,10 @@ function buildManagedConfigSignature(
     commands,
     messages,
     web,
-    tools
+    tools,
+    heartbeat,
+    cron,
+    hooks
   );
   const agentsPayload = buildAgentsPayload(normalized.agents);
   const bindingsMap = bindingsRulesToMap(normalized.bindings);
@@ -1409,6 +1848,9 @@ function buildManagedConfigSignature(
       messages: buildMessagesPayload(normalized.messages),
       web: buildWebPayload(normalized.web),
       tools: buildToolsPayload(normalized.tools),
+      heartbeat: buildHeartbeatPayload(normalized.heartbeat),
+      cron: buildCronPayload(normalized.cron),
+      hooks: buildHooksPayload(normalized.hooks),
     })
   );
 }
@@ -1420,7 +1862,10 @@ function validateVisualConfig(
   commands: ManagedCommandsConfig,
   messages: ManagedMessagesConfig,
   web: ManagedWebConfig,
-  tools: ManagedToolsConfig
+  tools: ManagedToolsConfig,
+  heartbeat: ManagedHeartbeatConfig,
+  cron: ManagedCronConfig,
+  hooks: ManagedHooksConfig
 ): string | null {
   const idSet = new Set<string>();
   for (let i = 0; i < agents.length; i += 1) {
@@ -1554,6 +1999,40 @@ function validateVisualConfig(
     return `Web reconnect.maxAttempts 无效：必须为 >= ${WEB_RECONNECT_MAX_ATTEMPTS_MIN} 的整数`;
   }
 
+  if (!heartbeat.every.trim()) {
+    return "Heartbeat every 无效：不能为空";
+  }
+
+  if (!heartbeat.target.trim()) {
+    return "Heartbeat target 无效：不能为空";
+  }
+
+  if (
+    !Number.isInteger(heartbeat.ackMaxChars) ||
+    heartbeat.ackMaxChars < HEARTBEAT_ACK_MAX_CHARS_MIN
+  ) {
+    return `Heartbeat ackMaxChars 无效：必须为 >= ${HEARTBEAT_ACK_MAX_CHARS_MIN} 的整数`;
+  }
+
+  if (!Number.isInteger(cron.maxConcurrentRuns) || cron.maxConcurrentRuns < 1) {
+    return "Cron maxConcurrentRuns 无效：必须为 >= 1 的整数";
+  }
+
+  if (
+    cron.sessionRetention !== false &&
+    (typeof cron.sessionRetention !== "string" || !cron.sessionRetention.trim())
+  ) {
+    return "Cron sessionRetention 无效：必须为 duration 字符串或 false";
+  }
+
+  if (!Number.isInteger(hooks.maxBodyBytes) || hooks.maxBodyBytes < 1) {
+    return "Hooks maxBodyBytes 无效：必须为 >= 1 的整数";
+  }
+
+  if (!hooks.path.trim()) {
+    return "Hooks path 无效：不能为空";
+  }
+
   const normalizedTools = normalizeManagedTools(tools);
   const toolConflict = normalizedTools.allow.find((name) =>
     normalizedTools.deny.includes(name)
@@ -1625,9 +2104,53 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   });
   const [toolsAllowInput, setToolsAllowInput] = useState("");
   const [toolsDenyInput, setToolsDenyInput] = useState("");
+  const [heartbeatConfig, setHeartbeatConfig] =
+    useState<ManagedHeartbeatConfig>(DEFAULT_HEARTBEAT_CONFIG);
+  const [heartbeatEveryInput, setHeartbeatEveryInput] = useState(
+    DEFAULT_HEARTBEAT_CONFIG.every
+  );
+  const [heartbeatModelInput, setHeartbeatModelInput] = useState(
+    DEFAULT_HEARTBEAT_CONFIG.model
+  );
+  const [heartbeatTargetInput, setHeartbeatTargetInput] = useState(
+    DEFAULT_HEARTBEAT_CONFIG.target
+  );
+  const [heartbeatPromptInput, setHeartbeatPromptInput] = useState(
+    DEFAULT_HEARTBEAT_CONFIG.prompt
+  );
+  const [heartbeatAckMaxCharsInput, setHeartbeatAckMaxCharsInput] = useState(
+    String(DEFAULT_HEARTBEAT_CONFIG.ackMaxChars)
+  );
+  const [cronConfig, setCronConfig] =
+    useState<ManagedCronConfig>(DEFAULT_CRON_CONFIG);
+  const [cronMaxConcurrentRunsInput, setCronMaxConcurrentRunsInput] = useState(
+    String(DEFAULT_CRON_CONFIG.maxConcurrentRuns)
+  );
+  const [cronSessionRetentionInput, setCronSessionRetentionInput] =
+    useState("");
+  const [cronSessionRetentionDisabled, setCronSessionRetentionDisabled] =
+    useState(DEFAULT_CRON_CONFIG.sessionRetention === false);
+  const [cronWebhookInput, setCronWebhookInput] = useState(
+    DEFAULT_CRON_CONFIG.webhook
+  );
+  const [cronWebhookTokenInput, setCronWebhookTokenInput] = useState(
+    DEFAULT_CRON_CONFIG.webhookToken
+  );
+  const [hooksConfig, setHooksConfig] =
+    useState<ManagedHooksConfig>(DEFAULT_HOOKS_CONFIG);
+  const [hooksPathInput, setHooksPathInput] = useState(
+    DEFAULT_HOOKS_CONFIG.path
+  );
+  const [hooksTokenInput, setHooksTokenInput] = useState(
+    DEFAULT_HOOKS_CONFIG.token
+  );
+  const [hooksMaxBodyBytesInput, setHooksMaxBodyBytesInput] = useState(
+    String(DEFAULT_HOOKS_CONFIG.maxBodyBytes)
+  );
 
   const [agentsListText, setAgentsListText] = useState("[]");
   const [bindingsText, setBindingsText] = useState("[]");
+
   const [, setConfigLoading] = useState(false); // 用于数据加载
   const [configError, setConfigError] = useState<string | null>(null);
 
@@ -1649,6 +2172,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     messages: false,
     web: false,
     tools: false,
+    heartbeat: false,
+    cron: false,
+    hooks: false,
+    sessions: false,
   });
   const [expertMode, setExpertMode] = useState(false);
 
@@ -1675,7 +2202,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         commandsConfig,
         messagesConfig,
         webConfig,
-        toolsConfig
+        toolsConfig,
+        heartbeatConfig,
+        cronConfig,
+        hooksConfig
       );
     }
 
@@ -1698,7 +2228,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         commandsConfig,
         messagesConfig,
         webConfig,
-        toolsConfig
+        toolsConfig,
+        heartbeatConfig,
+        cronConfig,
+        hooksConfig
       );
     } catch {
       return "__invalid_json__";
@@ -1712,6 +2245,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     messagesConfig,
     webConfig,
     toolsConfig,
+    heartbeatConfig,
+    cronConfig,
+    hooksConfig,
     agentsListText,
     bindingsText,
   ]);
@@ -1866,11 +2402,69 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     return `Tools allow/deny 冲突：${conflict} 同时存在于 allow 与 deny`;
   }, [toolsConfig]);
 
+  const heartbeatValidationHint = useMemo(() => {
+    if (!heartbeatEveryInput.trim()) {
+      return "Heartbeat every 不能为空";
+    }
+    if (!heartbeatTargetInput.trim()) {
+      return "Heartbeat target 不能为空";
+    }
+
+    const ackMaxChars = Number(heartbeatAckMaxCharsInput);
+    if (
+      !Number.isInteger(ackMaxChars) ||
+      ackMaxChars < HEARTBEAT_ACK_MAX_CHARS_MIN
+    ) {
+      return `Heartbeat ackMaxChars 必须为 >= ${HEARTBEAT_ACK_MAX_CHARS_MIN} 的整数`;
+    }
+
+    return null;
+  }, [heartbeatEveryInput, heartbeatTargetInput, heartbeatAckMaxCharsInput]);
+
+  const cronValidationHint = useMemo(() => {
+    const maxConcurrentRuns = Number(cronMaxConcurrentRunsInput);
+    if (
+      !Number.isInteger(maxConcurrentRuns) ||
+      maxConcurrentRuns < CRON_MAX_CONCURRENT_RUNS_MIN
+    ) {
+      return `Cron maxConcurrentRuns 必须为 >= ${CRON_MAX_CONCURRENT_RUNS_MIN} 的整数`;
+    }
+
+    if (!cronSessionRetentionDisabled && !cronSessionRetentionInput.trim()) {
+      return "Cron sessionRetention 关闭 false 后必须填写 duration 字符串";
+    }
+
+    return null;
+  }, [
+    cronMaxConcurrentRunsInput,
+    cronSessionRetentionDisabled,
+    cronSessionRetentionInput,
+  ]);
+
+  const hooksValidationHint = useMemo(() => {
+    if (!hooksPathInput.trim()) {
+      return "Hooks path 不能为空";
+    }
+
+    const maxBodyBytes = Number(hooksMaxBodyBytesInput);
+    if (
+      !Number.isInteger(maxBodyBytes) ||
+      maxBodyBytes < HOOKS_MAX_BODY_BYTES_MIN
+    ) {
+      return `Hooks maxBodyBytes 必须为 >= ${HOOKS_MAX_BODY_BYTES_MIN} 的整数`;
+    }
+
+    return null;
+  }, [hooksPathInput, hooksMaxBodyBytesInput]);
+
   const runtimeValidationHint =
     gatewayValidationHint ||
     messagesHistoryLimitHint ||
     webValidationHint ||
-    toolsConflictHint;
+    toolsConflictHint ||
+    heartbeatValidationHint ||
+    cronValidationHint ||
+    hooksValidationHint;
 
   const canApplyConfig =
     hasPendingChanges &&
@@ -1909,9 +2503,21 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     managedCommands: ManagedCommandsConfig,
     managedMessages: ManagedMessagesConfig,
     managedWeb: ManagedWebConfig,
-    managedTools: ManagedToolsConfig
+    managedTools: ManagedToolsConfig,
+    managedHeartbeat: ManagedHeartbeatConfig,
+    managedCron: ManagedCronConfig,
+    managedHooks: ManagedHooksConfig
   ) => {
     const fullConfig = await invoke<Record<string, unknown>>("get_config");
+    const existingAgents = isRecord(fullConfig.agents)
+      ? (fullConfig.agents as Record<string, unknown>)
+      : {};
+    const existingAgentsDefaults = isRecord(existingAgents.defaults)
+      ? (existingAgents.defaults as Record<string, unknown>)
+      : {};
+    const existingHeartbeat = isRecord(existingAgentsDefaults.heartbeat)
+      ? (existingAgentsDefaults.heartbeat as Record<string, unknown>)
+      : {};
     const existingCommands = isRecord(fullConfig.commands)
       ? (fullConfig.commands as Record<string, unknown>)
       : {};
@@ -1923,6 +2529,15 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       : {};
     const existingTools = isRecord(fullConfig.tools)
       ? (fullConfig.tools as Record<string, unknown>)
+      : {};
+    const existingToolsSessions = isRecord(existingTools.sessions)
+      ? (existingTools.sessions as Record<string, unknown>)
+      : {};
+    const existingCron = isRecord(fullConfig.cron)
+      ? (fullConfig.cron as Record<string, unknown>)
+      : {};
+    const existingHooks = isRecord(fullConfig.hooks)
+      ? (fullConfig.hooks as Record<string, unknown>)
       : {};
 
     const commandsPayload = buildCommandsPayload(managedCommands);
@@ -1984,16 +2599,30 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     const mergedTools: Record<string, unknown> = {
       ...existingTools,
       ...toolsPayload,
+      sessions: {
+        ...existingToolsSessions,
+        ...(isRecord(toolsPayload.sessions)
+          ? (toolsPayload.sessions as Record<string, unknown>)
+          : {}),
+      },
     };
+
+    const heartbeatPayload = buildHeartbeatPayload(managedHeartbeat);
+    const cronPayload = buildCronPayload(managedCron);
+    const hooksPayload = buildHooksPayload(managedHooks);
 
     const merged = {
       ...fullConfig,
       agents: {
-        ...(typeof fullConfig?.agents === "object" &&
-        fullConfig?.agents !== null
-          ? (fullConfig.agents as Record<string, unknown>)
-          : {}),
+        ...existingAgents,
         list: agentsList,
+        defaults: {
+          ...existingAgentsDefaults,
+          heartbeat: {
+            ...existingHeartbeat,
+            ...heartbeatPayload,
+          },
+        },
       },
       bindings: bindingsPayload as unknown as Record<string, unknown>,
       gateway: {
@@ -2018,7 +2647,16 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       messages: mergedMessages,
       web: mergedWeb,
       tools: mergedTools,
+      cron: {
+        ...existingCron,
+        ...cronPayload,
+      },
+      hooks: {
+        ...existingHooks,
+        ...hooksPayload,
+      },
     };
+
     return merged as Record<string, unknown>;
   };
 
@@ -2036,6 +2674,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     normalizedMessages: ManagedMessagesConfig;
     normalizedWeb: ManagedWebConfig;
     normalizedTools: ManagedToolsConfig;
+    normalizedHeartbeat: ManagedHeartbeatConfig;
+    normalizedCron: ManagedCronConfig;
+    normalizedHooks: ManagedHooksConfig;
     bindingsPayload: BindingsPayload;
   } => {
     const normalizedGateway = normalizeManagedGateway(gatewayConfig);
@@ -2043,6 +2684,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     const normalizedMessages = normalizeManagedMessages(messagesConfig);
     const normalizedWeb = normalizeManagedWeb(webConfig);
     const normalizedTools = normalizeManagedTools(toolsConfig);
+    const normalizedHeartbeat = normalizeManagedHeartbeat(heartbeatConfig);
+    const normalizedCron = normalizeManagedCron(cronConfig);
+    const normalizedHooks = normalizeManagedHooks(hooksConfig);
 
     if (expertMode) {
       const parsedAgentsList = JSON.parse(agentsListText);
@@ -2066,7 +2710,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         normalizedCommands,
         normalizedMessages,
         normalizedWeb,
-        normalizedTools
+        normalizedTools,
+        normalizedHeartbeat,
+        normalizedCron,
+        normalizedHooks
       );
       if (validationError) {
         throw new Error(validationError);
@@ -2086,6 +2733,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         normalizedMessages,
         normalizedWeb,
         normalizedTools,
+        normalizedHeartbeat,
+        normalizedCron,
+        normalizedHooks,
         bindingsPayload: parsedBindings,
       };
     }
@@ -2100,7 +2750,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       normalizedCommands,
       normalizedMessages,
       normalizedWeb,
-      normalizedTools
+      normalizedTools,
+      normalizedHeartbeat,
+      normalizedCron,
+      normalizedHooks
     );
     if (validationError) {
       throw new Error(validationError);
@@ -2124,6 +2777,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       normalizedMessages,
       normalizedWeb,
       normalizedTools,
+      normalizedHeartbeat,
+      normalizedCron,
+      normalizedHooks,
       bindingsPayload,
     };
   };
@@ -2143,7 +2799,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         payload.normalizedCommands,
         payload.normalizedMessages,
         payload.normalizedWeb,
-        payload.normalizedTools
+        payload.normalizedTools,
+        payload.normalizedHeartbeat,
+        payload.normalizedCron,
+        payload.normalizedHooks
       );
       const result = await invoke<PreviewConfigResponse>(
         "preview_config_change",
@@ -2191,7 +2850,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         payload.normalizedCommands,
         payload.normalizedMessages,
         payload.normalizedWeb,
-        payload.normalizedTools
+        payload.normalizedTools,
+        payload.normalizedHeartbeat,
+        payload.normalizedCron,
+        payload.normalizedHooks
       );
 
       const preview = await invoke<PreviewConfigResponse>(
@@ -2264,6 +2926,32 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setToolsConfig(payload.normalizedTools);
       setToolsAllowInput(payload.normalizedTools.allow.join("\n"));
       setToolsDenyInput(payload.normalizedTools.deny.join("\n"));
+      setHeartbeatConfig(payload.normalizedHeartbeat);
+      setHeartbeatEveryInput(payload.normalizedHeartbeat.every);
+      setHeartbeatModelInput(payload.normalizedHeartbeat.model);
+      setHeartbeatTargetInput(payload.normalizedHeartbeat.target);
+      setHeartbeatPromptInput(payload.normalizedHeartbeat.prompt);
+      setHeartbeatAckMaxCharsInput(
+        String(payload.normalizedHeartbeat.ackMaxChars)
+      );
+      setCronConfig(payload.normalizedCron);
+      setCronMaxConcurrentRunsInput(
+        String(payload.normalizedCron.maxConcurrentRuns)
+      );
+      setCronSessionRetentionDisabled(
+        payload.normalizedCron.sessionRetention === false
+      );
+      setCronSessionRetentionInput(
+        payload.normalizedCron.sessionRetention === false
+          ? ""
+          : payload.normalizedCron.sessionRetention
+      );
+      setCronWebhookInput(payload.normalizedCron.webhook);
+      setCronWebhookTokenInput(payload.normalizedCron.webhookToken);
+      setHooksConfig(payload.normalizedHooks);
+      setHooksPathInput(payload.normalizedHooks.path);
+      setHooksTokenInput(payload.normalizedHooks.token);
+      setHooksMaxBodyBytesInput(String(payload.normalizedHooks.maxBodyBytes));
       setBaselineManagedSignature(
         buildManagedConfigSignature(
           payload.normalizedAgents,
@@ -2272,7 +2960,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           payload.normalizedCommands,
           payload.normalizedMessages,
           payload.normalizedWeb,
-          payload.normalizedTools
+          payload.normalizedTools,
+          payload.normalizedHeartbeat,
+          payload.normalizedCron,
+          payload.normalizedHooks
         )
       );
       setConfigMessage(
@@ -2340,6 +3031,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         nextMessagesConfig,
         nextWebConfig,
         nextToolsConfig,
+        nextHeartbeatConfig,
+        nextCronConfig,
+        nextHooksConfig,
       } = applyRuntimeConfigSnapshot(fullConfigResult);
 
       setVisualAgents(nextVisualAgents);
@@ -2361,7 +3055,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           nextCommandsConfig,
           nextMessagesConfig,
           nextWebConfig,
-          nextToolsConfig
+          nextToolsConfig,
+          nextHeartbeatConfig,
+          nextCronConfig,
+          nextHooksConfig
         )
       );
       setShowRollbackDialog(false);
@@ -2499,6 +3196,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
           nextMessagesConfig,
           nextWebConfig,
           nextToolsConfig,
+          nextHeartbeatConfig,
+          nextCronConfig,
+          nextHooksConfig,
         } = applyRuntimeConfigSnapshot(loadedFullConfig);
 
         setVisualAgents(nextVisualAgents);
@@ -2520,7 +3220,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
             nextCommandsConfig,
             nextMessagesConfig,
             nextWebConfig,
-            nextToolsConfig
+            nextToolsConfig,
+            nextHeartbeatConfig,
+            nextCronConfig,
+            nextHooksConfig
           )
         );
 
@@ -2560,6 +3263,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       const nextMessages = normalizeManagedMessages(messagesConfig);
       const nextWeb = normalizeManagedWeb(webConfig);
       const nextTools = normalizeManagedTools(toolsConfig);
+      const nextHeartbeat = normalizeManagedHeartbeat(heartbeatConfig);
+      const nextCron = normalizeManagedCron(cronConfig);
+      const nextHooks = normalizeManagedHooks(hooksConfig);
       const validationError = validateVisualConfig(
         nextVisualAgents,
         nextVisualBindings,
@@ -2567,7 +3273,10 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
         nextCommands,
         nextMessages,
         nextWeb,
-        nextTools
+        nextTools,
+        nextHeartbeat,
+        nextCron,
+        nextHooks
       );
       if (validationError) {
         throw new Error(validationError);
@@ -2594,6 +3303,24 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
       setToolsConfig(nextTools);
       setToolsAllowInput(nextTools.allow.join("\n"));
       setToolsDenyInput(nextTools.deny.join("\n"));
+      setHeartbeatConfig(nextHeartbeat);
+      setHeartbeatEveryInput(nextHeartbeat.every);
+      setHeartbeatModelInput(nextHeartbeat.model);
+      setHeartbeatTargetInput(nextHeartbeat.target);
+      setHeartbeatPromptInput(nextHeartbeat.prompt);
+      setHeartbeatAckMaxCharsInput(String(nextHeartbeat.ackMaxChars));
+      setCronConfig(nextCron);
+      setCronMaxConcurrentRunsInput(String(nextCron.maxConcurrentRuns));
+      setCronSessionRetentionDisabled(nextCron.sessionRetention === false);
+      setCronSessionRetentionInput(
+        nextCron.sessionRetention === false ? "" : nextCron.sessionRetention
+      );
+      setCronWebhookInput(nextCron.webhook);
+      setCronWebhookTokenInput(nextCron.webhookToken);
+      setHooksConfig(nextHooks);
+      setHooksPathInput(nextHooks.path);
+      setHooksTokenInput(nextHooks.token);
+      setHooksMaxBodyBytesInput(String(nextHooks.maxBodyBytes));
       setExpertMode(false);
       return true;
     } catch (e) {
@@ -3017,6 +3744,197 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     }));
   };
 
+  const handleToolsSessionsVisibilityChange = (value: SessionsVisibility) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setToolsConfig((prev) => ({
+      ...prev,
+      sessionsVisibility: value,
+    }));
+  };
+
+  const handleHeartbeatEnabledChange = (checked: boolean) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHeartbeatConfig((prev) => ({
+      ...prev,
+      includeReasoning: checked,
+    }));
+  };
+
+  const handleHeartbeatSuppressWarningsChange = (checked: boolean) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHeartbeatConfig((prev) => ({
+      ...prev,
+      suppressToolErrorWarnings: checked,
+    }));
+  };
+
+  const handleHeartbeatEveryInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHeartbeatEveryInput(value);
+    setHeartbeatConfig((prev) => ({
+      ...prev,
+      every: value,
+    }));
+  };
+
+  const handleHeartbeatModelInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHeartbeatModelInput(value);
+    setHeartbeatConfig((prev) => ({
+      ...prev,
+      model: value,
+    }));
+  };
+
+  const handleHeartbeatTargetInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHeartbeatTargetInput(value);
+    setHeartbeatConfig((prev) => ({
+      ...prev,
+      target: value,
+    }));
+  };
+
+  const handleHeartbeatPromptInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHeartbeatPromptInput(value);
+    setHeartbeatConfig((prev) => ({
+      ...prev,
+      prompt: value,
+    }));
+  };
+
+  const handleHeartbeatAckMaxCharsInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHeartbeatAckMaxCharsInput(value);
+    const parsed = Number(value);
+    setHeartbeatConfig((prev) => ({
+      ...prev,
+      ackMaxChars: Number.isInteger(parsed) ? parsed : Number.NaN,
+    }));
+  };
+
+  const handleCronEnabledChange = (checked: boolean) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setCronConfig((prev) => ({
+      ...prev,
+      enabled: checked,
+    }));
+  };
+
+  const handleCronMaxConcurrentRunsInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setCronMaxConcurrentRunsInput(value);
+    const parsed = Number(value);
+    setCronConfig((prev) => ({
+      ...prev,
+      maxConcurrentRuns: Number.isInteger(parsed) ? parsed : Number.NaN,
+    }));
+  };
+
+  const handleCronSessionRetentionDisabledChange = (checked: boolean) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setCronSessionRetentionDisabled(checked);
+    setCronConfig((prev) => ({
+      ...prev,
+      sessionRetention: checked
+        ? false
+        : prev.sessionRetention === false
+        ? ""
+        : prev.sessionRetention,
+    }));
+  };
+
+  const handleCronSessionRetentionInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setCronSessionRetentionInput(value);
+    setCronConfig((prev) => ({
+      ...prev,
+      sessionRetention: value,
+    }));
+  };
+
+  const handleCronWebhookInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setCronWebhookInput(value);
+    setCronConfig((prev) => ({
+      ...prev,
+      webhook: value,
+    }));
+  };
+
+  const handleCronWebhookTokenInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setCronWebhookTokenInput(value);
+    setCronConfig((prev) => ({
+      ...prev,
+      webhookToken: value,
+    }));
+  };
+
+  const handleHooksEnabledChange = (checked: boolean) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHooksConfig((prev) => ({
+      ...prev,
+      enabled: checked,
+    }));
+  };
+
+  const handleHooksPathInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHooksPathInput(value);
+    setHooksConfig((prev) => ({
+      ...prev,
+      path: value,
+    }));
+  };
+
+  const handleHooksTokenInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHooksTokenInput(value);
+    setHooksConfig((prev) => ({
+      ...prev,
+      token: value,
+    }));
+  };
+
+  const handleHooksMaxBodyBytesInputChange = (value: string) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHooksMaxBodyBytesInput(value);
+    const parsed = Number(value);
+    setHooksConfig((prev) => ({
+      ...prev,
+      maxBodyBytes: Number.isInteger(parsed) ? parsed : Number.NaN,
+    }));
+  };
+
+  const handleHooksAllowRequestSessionKeyChange = (checked: boolean) => {
+    setConfigError(null);
+    setConfigMessage(null);
+    setHooksConfig((prev) => ({
+      ...prev,
+      allowRequestSessionKey: checked,
+    }));
+  };
+
   const handleRuntimeDocToggle = (sectionKey: RuntimeSectionKey) => {
     setRuntimeDocExpanded((prev) => ({
       ...prev,
@@ -3097,6 +4015,9 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     const nextMessagesConfig = parseMessagesConfig(fullConfig);
     const nextWebConfig = parseWebConfig(fullConfig);
     const nextToolsConfig = parseToolsConfig(fullConfig);
+    const nextHeartbeatConfig = parseHeartbeatConfig(fullConfig);
+    const nextCronConfig = parseCronConfig(fullConfig);
+    const nextHooksConfig = parseHooksConfig(fullConfig);
 
     setCommandsConfig(nextCommandsConfig);
     setCommandAllowFromInput(
@@ -3118,12 +4039,35 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     setToolsConfig(nextToolsConfig);
     setToolsAllowInput(nextToolsConfig.allow.join("\n"));
     setToolsDenyInput(nextToolsConfig.deny.join("\n"));
+    setHeartbeatConfig(nextHeartbeatConfig);
+    setHeartbeatEveryInput(nextHeartbeatConfig.every);
+    setHeartbeatModelInput(nextHeartbeatConfig.model);
+    setHeartbeatTargetInput(nextHeartbeatConfig.target);
+    setHeartbeatPromptInput(nextHeartbeatConfig.prompt);
+    setHeartbeatAckMaxCharsInput(String(nextHeartbeatConfig.ackMaxChars));
+    setCronConfig(nextCronConfig);
+    setCronMaxConcurrentRunsInput(String(nextCronConfig.maxConcurrentRuns));
+    setCronSessionRetentionDisabled(nextCronConfig.sessionRetention === false);
+    setCronSessionRetentionInput(
+      nextCronConfig.sessionRetention === false
+        ? ""
+        : nextCronConfig.sessionRetention
+    );
+    setCronWebhookInput(nextCronConfig.webhook);
+    setCronWebhookTokenInput(nextCronConfig.webhookToken);
+    setHooksConfig(nextHooksConfig);
+    setHooksPathInput(nextHooksConfig.path);
+    setHooksTokenInput(nextHooksConfig.token);
+    setHooksMaxBodyBytesInput(String(nextHooksConfig.maxBodyBytes));
 
     return {
       nextCommandsConfig,
       nextMessagesConfig,
       nextWebConfig,
       nextToolsConfig,
+      nextHeartbeatConfig,
+      nextCronConfig,
+      nextHooksConfig,
     };
   };
 
@@ -3836,6 +4780,26 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
                 />
               </div>
 
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  tools.sessions.visibility
+                </label>
+                <select
+                  value={toolsConfig.sessionsVisibility}
+                  onChange={(e) =>
+                    handleToolsSessionsVisibilityChange(
+                      e.target.value as SessionsVisibility
+                    )
+                  }
+                  className="input-base"
+                >
+                  <option value="self">self</option>
+                  <option value="tree">tree</option>
+                  <option value="agent">agent</option>
+                  <option value="all">all</option>
+                </select>
+              </div>
+
               <p
                 className={`text-xs ${
                   toolsConflictHint ? "text-amber-300" : "text-emerald-300"
@@ -3843,6 +4807,312 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
               >
                 {toolsConflictHint ?? "Tools allow/deny 校验通过"}
               </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+              {renderRuntimeDoc("heartbeat")}
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  every (duration)
+                </label>
+                <input
+                  type="text"
+                  value={heartbeatEveryInput}
+                  onChange={(e) =>
+                    handleHeartbeatEveryInputChange(e.target.value)
+                  }
+                  className="input-base"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  model
+                </label>
+                <input
+                  type="text"
+                  value={heartbeatModelInput}
+                  onChange={(e) =>
+                    handleHeartbeatModelInputChange(e.target.value)
+                  }
+                  className="input-base"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  target
+                </label>
+                <input
+                  type="text"
+                  value={heartbeatTargetInput}
+                  onChange={(e) =>
+                    handleHeartbeatTargetInputChange(e.target.value)
+                  }
+                  className="input-base"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  prompt
+                </label>
+                <textarea
+                  value={heartbeatPromptInput}
+                  onChange={(e) =>
+                    handleHeartbeatPromptInputChange(e.target.value)
+                  }
+                  rows={4}
+                  className="input-base"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  ackMaxChars (&gt;= {HEARTBEAT_ACK_MAX_CHARS_MIN})
+                </label>
+                <input
+                  type="number"
+                  min={HEARTBEAT_ACK_MAX_CHARS_MIN}
+                  value={heartbeatAckMaxCharsInput}
+                  onChange={(e) =>
+                    handleHeartbeatAckMaxCharsInputChange(e.target.value)
+                  }
+                  className="input-base"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={heartbeatConfig.includeReasoning}
+                    onChange={(e) =>
+                      handleHeartbeatEnabledChange(e.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  includeReasoning
+                </label>
+
+                <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={heartbeatConfig.suppressToolErrorWarnings}
+                    onChange={(e) =>
+                      handleHeartbeatSuppressWarningsChange(e.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  suppressToolErrorWarnings
+                </label>
+              </div>
+
+              <p
+                className={`text-xs ${
+                  heartbeatValidationHint
+                    ? "text-amber-300"
+                    : "text-emerald-300"
+                }`}
+              >
+                {heartbeatValidationHint ?? "Heartbeat 参数校验通过"}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+              {renderRuntimeDoc("cron")}
+
+              <div className="flex items-center justify-between p-3 rounded-lg bg-dark-700/60 border border-dark-500">
+                <span className="text-sm text-white">cron.enabled</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="sr-only peer"
+                    checked={cronConfig.enabled}
+                    onChange={(e) => handleCronEnabledChange(e.target.checked)}
+                  />
+                  <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  maxConcurrentRuns (&gt;= {CRON_MAX_CONCURRENT_RUNS_MIN})
+                </label>
+                <input
+                  type="number"
+                  min={CRON_MAX_CONCURRENT_RUNS_MIN}
+                  value={cronMaxConcurrentRunsInput}
+                  onChange={(e) =>
+                    handleCronMaxConcurrentRunsInputChange(e.target.value)
+                  }
+                  className="input-base"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={cronSessionRetentionDisabled}
+                    onChange={(e) =>
+                      handleCronSessionRetentionDisabledChange(e.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                  />
+                  sessionRetention = false
+                </label>
+                <input
+                  type="text"
+                  value={cronSessionRetentionInput}
+                  onChange={(e) =>
+                    handleCronSessionRetentionInputChange(e.target.value)
+                  }
+                  disabled={cronSessionRetentionDisabled}
+                  className="input-base disabled:opacity-60"
+                  placeholder="例如 24h"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  webhook
+                </label>
+                <input
+                  type="text"
+                  value={cronWebhookInput}
+                  onChange={(e) => handleCronWebhookInputChange(e.target.value)}
+                  className="input-base"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  webhookToken
+                </label>
+                <input
+                  type="password"
+                  value={cronWebhookTokenInput}
+                  onChange={(e) =>
+                    handleCronWebhookTokenInputChange(e.target.value)
+                  }
+                  className="input-base"
+                />
+              </div>
+
+              <p
+                className={`text-xs ${
+                  cronValidationHint ? "text-amber-300" : "text-emerald-300"
+                }`}
+              >
+                {cronValidationHint ?? "Cron 参数校验通过"}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+              {renderRuntimeDoc("hooks")}
+
+              <div className="flex items-center justify-between p-3 rounded-lg bg-dark-700/60 border border-dark-500">
+                <span className="text-sm text-white">hooks.enabled</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="sr-only peer"
+                    checked={hooksConfig.enabled}
+                    onChange={(e) => handleHooksEnabledChange(e.target.checked)}
+                  />
+                  <div className="w-11 h-6 bg-dark-500 peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">path</label>
+                <input
+                  type="text"
+                  value={hooksPathInput}
+                  onChange={(e) => handleHooksPathInputChange(e.target.value)}
+                  className="input-base"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  token
+                </label>
+                <input
+                  type="password"
+                  value={hooksTokenInput}
+                  onChange={(e) => handleHooksTokenInputChange(e.target.value)}
+                  className="input-base"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  maxBodyBytes (&gt;= {HOOKS_MAX_BODY_BYTES_MIN})
+                </label>
+                <input
+                  type="number"
+                  min={HOOKS_MAX_BODY_BYTES_MIN}
+                  value={hooksMaxBodyBytesInput}
+                  onChange={(e) =>
+                    handleHooksMaxBodyBytesInputChange(e.target.value)
+                  }
+                  className="input-base"
+                />
+              </div>
+
+              <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+                <input
+                  type="checkbox"
+                  checked={hooksConfig.allowRequestSessionKey}
+                  onChange={(e) =>
+                    handleHooksAllowRequestSessionKeyChange(e.target.checked)
+                  }
+                  className="h-4 w-4 rounded border-dark-400 bg-dark-600 text-cyan-500 focus:ring-cyan-500"
+                />
+                allowRequestSessionKey
+              </label>
+
+              <p
+                className={`text-xs ${
+                  hooksValidationHint ? "text-amber-300" : "text-emerald-300"
+                }`}
+              >
+                {hooksValidationHint ?? "Hooks 参数校验通过"}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-4">
+              {renderRuntimeDoc("sessions")}
+
+              <div>
+                <label className="block text-sm text-gray-400 mb-2">
+                  tools.sessions.visibility
+                </label>
+                <select
+                  value={toolsConfig.sessionsVisibility}
+                  onChange={(e) =>
+                    handleToolsSessionsVisibilityChange(
+                      e.target.value as SessionsVisibility
+                    )
+                  }
+                  className="input-base"
+                >
+                  <option value="self">self</option>
+                  <option value="tree">tree</option>
+                  <option value="agent">agent</option>
+                  <option value="all">all</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  该字段写入 tools.sessions.visibility，用于控制会话可见范围。
+                </p>
+              </div>
             </div>
           </div>
         </div>
