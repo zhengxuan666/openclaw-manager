@@ -984,6 +984,87 @@ function hasDiffSummaryChanges(summary: ConfigDiffSummary): boolean {
   return summary.added + summary.modified + summary.removed > 0;
 }
 
+function cloneConfigRecord(
+  config: Record<string, unknown>
+): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+}
+
+function isComparableValueEqual(left: unknown, right: unknown): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left === undefined || right === undefined) {
+    return false;
+  }
+  return (
+    JSON.stringify(toStableComparable(left)) ===
+    JSON.stringify(toStableComparable(right))
+  );
+}
+
+function setConfigPathValue(
+  target: Record<string, unknown>,
+  path: string[],
+  value: unknown
+): void {
+  if (path.length === 0) {
+    return;
+  }
+
+  let cursor: Record<string, unknown> = target;
+  for (const segment of path.slice(0, -1)) {
+    const next = cursor[segment];
+    if (!isRecord(next)) {
+      cursor[segment] = {};
+    }
+    cursor = cursor[segment] as Record<string, unknown>;
+  }
+
+  cursor[path[path.length - 1]] = value;
+}
+
+function getConfigPathValue(
+  source: Record<string, unknown>,
+  path: string[]
+): unknown {
+  if (path.length === 0) {
+    return source;
+  }
+
+  let cursor: unknown = source;
+  for (const segment of path) {
+    if (!isRecord(cursor)) {
+      return undefined;
+    }
+    cursor = cursor[segment];
+  }
+  return cursor;
+}
+
+function deleteConfigPathValue(
+  target: Record<string, unknown>,
+  path: string[]
+): void {
+  if (path.length === 0) {
+    return;
+  }
+
+  let cursor: unknown = target;
+  for (const segment of path.slice(0, -1)) {
+    if (!isRecord(cursor) || !isRecord(cursor[segment])) {
+      return;
+    }
+    cursor = cursor[segment];
+  }
+
+  if (!isRecord(cursor)) {
+    return;
+  }
+
+  delete cursor[path[path.length - 1]];
+}
+
 function parseGatewayReloadMode(value: unknown): GatewayReloadMode {
   if (
     value === "hybrid" ||
@@ -1805,7 +1886,7 @@ function normalizeVisualConfig(
   };
 }
 
-function buildManagedConfigSignature(
+export function buildManagedConfigSignature(
   agents: VisualAgent[],
   bindings: VisualBinding[],
   gateway: ManagedGatewayConfig,
@@ -2042,6 +2123,341 @@ function validateVisualConfig(
   }
 
   return null;
+}
+
+interface PathScopedGlobalConfigPayloadArgs {
+  fullConfig: Record<string, unknown>;
+  agentsList: Record<string, unknown>[];
+  bindingsPayload: BindingsPayload;
+  managedGateway: ManagedGatewayConfig;
+  managedCommands: ManagedCommandsConfig;
+  managedMessages: ManagedMessagesConfig;
+  managedWeb: ManagedWebConfig;
+  managedTools: ManagedToolsConfig;
+  managedHeartbeat: ManagedHeartbeatConfig;
+  managedCron: ManagedCronConfig;
+  managedHooks: ManagedHooksConfig;
+}
+
+export function buildPathScopedGlobalConfigPayload(
+  args: PathScopedGlobalConfigPayloadArgs
+): Record<string, unknown> {
+  const {
+    fullConfig,
+    agentsList,
+    bindingsPayload,
+    managedGateway,
+    managedCommands,
+    managedMessages,
+    managedWeb,
+    managedTools,
+    managedHeartbeat,
+    managedCron,
+    managedHooks,
+  } = args;
+
+  const merged = cloneConfigRecord(fullConfig);
+
+  const existingAgentsListSource = isRecord(fullConfig.agents)
+    ? (fullConfig.agents as Record<string, unknown>).list
+    : [];
+  const existingAgentsList = buildAgentsPayload(
+    normalizeVisualAgents(parseAgentsList(existingAgentsListSource))
+  );
+  if (!isComparableValueEqual(existingAgentsList, agentsList)) {
+    setConfigPathValue(merged, ["agents", "list"], agentsList);
+  }
+
+  const existingBindingsMap = parseBindings(
+    isRecord(fullConfig) ? fullConfig.bindings : []
+  );
+  const nextBindingsMap = parseBindings(bindingsPayload);
+  if (!isComparableValueEqual(existingBindingsMap, nextBindingsMap)) {
+    setConfigPathValue(merged, ["bindings"], bindingsPayload);
+  }
+
+  const existingGateway = normalizeManagedGateway(parseGatewayConfig(fullConfig));
+  if (existingGateway.port !== managedGateway.port) {
+    setConfigPathValue(merged, ["gateway", "port"], managedGateway.port);
+  }
+  if (existingGateway.bind !== managedGateway.bind) {
+    setConfigPathValue(merged, ["gateway", "bind"], managedGateway.bind);
+  }
+  if (
+    !isComparableValueEqual(
+      existingGateway.trustedProxies,
+      managedGateway.trustedProxies
+    )
+  ) {
+    setConfigPathValue(merged, ["gateway", "trustedProxies"], [
+      ...managedGateway.trustedProxies,
+    ]);
+  }
+  if (existingGateway.reloadMode !== managedGateway.reloadMode) {
+    setConfigPathValue(merged, ["gateway", "reload", "mode"], managedGateway.reloadMode);
+  }
+
+  const existingCommands = normalizeManagedCommands(
+    parseCommandsConfig(fullConfig)
+  );
+  if (
+    managedCommands.native !== undefined &&
+    managedCommands.native !== existingCommands.native
+  ) {
+    setConfigPathValue(merged, ["commands", "native"], managedCommands.native);
+  }
+  if (
+    managedCommands.text !== undefined &&
+    managedCommands.text !== existingCommands.text
+  ) {
+    setConfigPathValue(merged, ["commands", "text"], managedCommands.text);
+  }
+  if (
+    managedCommands.bash !== undefined &&
+    managedCommands.bash !== existingCommands.bash
+  ) {
+    setConfigPathValue(merged, ["commands", "bash"], managedCommands.bash);
+  }
+  if (
+    managedCommands.config !== undefined &&
+    managedCommands.config !== existingCommands.config
+  ) {
+    setConfigPathValue(merged, ["commands", "config"], managedCommands.config);
+  }
+  if (
+    managedCommands.debug !== undefined &&
+    managedCommands.debug !== existingCommands.debug
+  ) {
+    setConfigPathValue(merged, ["commands", "debug"], managedCommands.debug);
+  }
+  if (
+    managedCommands.restart !== undefined &&
+    managedCommands.restart !== existingCommands.restart
+  ) {
+    setConfigPathValue(merged, ["commands", "restart"], managedCommands.restart);
+  }
+  if (
+    managedCommands.useAccessGroups !== undefined &&
+    managedCommands.useAccessGroups !== existingCommands.useAccessGroups
+  ) {
+    setConfigPathValue(
+      merged,
+      ["commands", "useAccessGroups"],
+      managedCommands.useAccessGroups
+    );
+  }
+  if (
+    managedCommands.allowFromAll !== undefined &&
+    !isComparableValueEqual(
+      existingCommands.allowFromAll,
+      managedCommands.allowFromAll
+    )
+  ) {
+    setConfigPathValue(
+      merged,
+      ["commands", "allowFrom", "*"],
+      managedCommands.allowFromAll
+    );
+  }
+
+  const existingMessages = normalizeManagedMessages(parseMessagesConfig(fullConfig));
+  if (managedMessages.groupChatHistoryLimitEnabled) {
+    if (
+      !existingMessages.groupChatHistoryLimitEnabled ||
+      existingMessages.groupChatHistoryLimit !==
+        managedMessages.groupChatHistoryLimit
+    ) {
+      setConfigPathValue(merged, ["messages", "groupChat", "historyLimit"], Math.max(0, Math.trunc(managedMessages.groupChatHistoryLimit)));
+    }
+  } else if (existingMessages.groupChatHistoryLimitEnabled) {
+    deleteConfigPathValue(merged, ["messages", "groupChat", "historyLimit"]);
+    const groupChat = getConfigPathValue(merged, ["messages", "groupChat"]);
+    if (isRecord(groupChat) && Object.keys(groupChat).length === 0) {
+      deleteConfigPathValue(merged, ["messages", "groupChat"]);
+    }
+  }
+
+  const existingWeb = normalizeManagedWeb(parseWebConfig(fullConfig));
+  if (existingWeb.enabled !== managedWeb.enabled) {
+    setConfigPathValue(merged, ["web", "enabled"], managedWeb.enabled);
+  }
+  if (existingWeb.heartbeatSeconds !== managedWeb.heartbeatSeconds) {
+    setConfigPathValue(
+      merged,
+      ["web", "heartbeatSeconds"],
+      managedWeb.heartbeatSeconds
+    );
+  }
+  if (existingWeb.reconnect.initialMs !== managedWeb.reconnect.initialMs) {
+    setConfigPathValue(
+      merged,
+      ["web", "reconnect", "initialMs"],
+      managedWeb.reconnect.initialMs
+    );
+  }
+  if (existingWeb.reconnect.maxMs !== managedWeb.reconnect.maxMs) {
+    setConfigPathValue(
+      merged,
+      ["web", "reconnect", "maxMs"],
+      managedWeb.reconnect.maxMs
+    );
+  }
+  if (existingWeb.reconnect.factor !== managedWeb.reconnect.factor) {
+    setConfigPathValue(
+      merged,
+      ["web", "reconnect", "factor"],
+      managedWeb.reconnect.factor
+    );
+  }
+  if (existingWeb.reconnect.jitter !== managedWeb.reconnect.jitter) {
+    setConfigPathValue(
+      merged,
+      ["web", "reconnect", "jitter"],
+      managedWeb.reconnect.jitter
+    );
+  }
+  if (existingWeb.reconnect.maxAttempts !== managedWeb.reconnect.maxAttempts) {
+    setConfigPathValue(
+      merged,
+      ["web", "reconnect", "maxAttempts"],
+      managedWeb.reconnect.maxAttempts
+    );
+  }
+
+  const existingTools = normalizeManagedTools(parseToolsConfig(fullConfig));
+  if (!isComparableValueEqual(existingTools.allow, managedTools.allow)) {
+    setConfigPathValue(merged, ["tools", "allow"], [...managedTools.allow]);
+  }
+  if (!isComparableValueEqual(existingTools.deny, managedTools.deny)) {
+    setConfigPathValue(merged, ["tools", "deny"], [...managedTools.deny]);
+  }
+  if (
+    existingTools.sessionsVisibility !== managedTools.sessionsVisibility
+  ) {
+    setConfigPathValue(
+      merged,
+      ["tools", "sessions", "visibility"],
+      managedTools.sessionsVisibility
+    );
+  }
+
+  const existingHeartbeat = normalizeManagedHeartbeat(
+    parseHeartbeatConfig(fullConfig)
+  );
+  if (existingHeartbeat.every !== managedHeartbeat.every) {
+    setConfigPathValue(
+      merged,
+      ["agents", "defaults", "heartbeat", "every"],
+      managedHeartbeat.every
+    );
+  }
+  if (existingHeartbeat.model !== managedHeartbeat.model) {
+    setConfigPathValue(
+      merged,
+      ["agents", "defaults", "heartbeat", "model"],
+      managedHeartbeat.model
+    );
+  }
+  if (
+    existingHeartbeat.includeReasoning !== managedHeartbeat.includeReasoning
+  ) {
+    setConfigPathValue(
+      merged,
+      ["agents", "defaults", "heartbeat", "includeReasoning"],
+      managedHeartbeat.includeReasoning
+    );
+  }
+  if (existingHeartbeat.target !== managedHeartbeat.target) {
+    setConfigPathValue(
+      merged,
+      ["agents", "defaults", "heartbeat", "target"],
+      managedHeartbeat.target
+    );
+  }
+  if (existingHeartbeat.prompt !== managedHeartbeat.prompt) {
+    setConfigPathValue(
+      merged,
+      ["agents", "defaults", "heartbeat", "prompt"],
+      managedHeartbeat.prompt
+    );
+  }
+  if (existingHeartbeat.ackMaxChars !== managedHeartbeat.ackMaxChars) {
+    setConfigPathValue(
+      merged,
+      ["agents", "defaults", "heartbeat", "ackMaxChars"],
+      managedHeartbeat.ackMaxChars
+    );
+  }
+  if (
+    existingHeartbeat.suppressToolErrorWarnings !==
+    managedHeartbeat.suppressToolErrorWarnings
+  ) {
+    setConfigPathValue(
+      merged,
+      ["agents", "defaults", "heartbeat", "suppressToolErrorWarnings"],
+      managedHeartbeat.suppressToolErrorWarnings
+    );
+  }
+
+  const existingCron = normalizeManagedCron(parseCronConfig(fullConfig));
+  if (existingCron.enabled !== managedCron.enabled) {
+    setConfigPathValue(merged, ["cron", "enabled"], managedCron.enabled);
+  }
+  if (existingCron.maxConcurrentRuns !== managedCron.maxConcurrentRuns) {
+    setConfigPathValue(
+      merged,
+      ["cron", "maxConcurrentRuns"],
+      managedCron.maxConcurrentRuns
+    );
+  }
+  if (
+    !isComparableValueEqual(existingCron.sessionRetention, managedCron.sessionRetention)
+  ) {
+    setConfigPathValue(
+      merged,
+      ["cron", "sessionRetention"],
+      managedCron.sessionRetention
+    );
+  }
+  if (existingCron.webhook !== managedCron.webhook) {
+    setConfigPathValue(merged, ["cron", "webhook"], managedCron.webhook);
+  }
+  if (existingCron.webhookToken !== managedCron.webhookToken) {
+    setConfigPathValue(
+      merged,
+      ["cron", "webhookToken"],
+      managedCron.webhookToken
+    );
+  }
+
+  const existingHooks = normalizeManagedHooks(parseHooksConfig(fullConfig));
+  if (existingHooks.enabled !== managedHooks.enabled) {
+    setConfigPathValue(merged, ["hooks", "enabled"], managedHooks.enabled);
+  }
+  if (existingHooks.token !== managedHooks.token) {
+    setConfigPathValue(merged, ["hooks", "token"], managedHooks.token);
+  }
+  if (existingHooks.path !== managedHooks.path) {
+    setConfigPathValue(merged, ["hooks", "path"], managedHooks.path);
+  }
+  if (existingHooks.maxBodyBytes !== managedHooks.maxBodyBytes) {
+    setConfigPathValue(
+      merged,
+      ["hooks", "maxBodyBytes"],
+      managedHooks.maxBodyBytes
+    );
+  }
+  if (
+    existingHooks.allowRequestSessionKey !== managedHooks.allowRequestSessionKey
+  ) {
+    setConfigPathValue(
+      merged,
+      ["hooks", "allowRequestSessionKey"],
+      managedHooks.allowRequestSessionKey
+    );
+  }
+
+  return merged;
 }
 
 export function Settings({ onEnvironmentChange }: SettingsProps) {
@@ -2509,155 +2925,19 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     managedHooks: ManagedHooksConfig
   ) => {
     const fullConfig = await invoke<Record<string, unknown>>("get_config");
-    const existingAgents = isRecord(fullConfig.agents)
-      ? (fullConfig.agents as Record<string, unknown>)
-      : {};
-    const existingAgentsDefaults = isRecord(existingAgents.defaults)
-      ? (existingAgents.defaults as Record<string, unknown>)
-      : {};
-    const existingHeartbeat = isRecord(existingAgentsDefaults.heartbeat)
-      ? (existingAgentsDefaults.heartbeat as Record<string, unknown>)
-      : {};
-    const existingCommands = isRecord(fullConfig.commands)
-      ? (fullConfig.commands as Record<string, unknown>)
-      : {};
-    const existingMessages = isRecord(fullConfig.messages)
-      ? (fullConfig.messages as Record<string, unknown>)
-      : {};
-    const existingWeb = isRecord(fullConfig.web)
-      ? (fullConfig.web as Record<string, unknown>)
-      : {};
-    const existingTools = isRecord(fullConfig.tools)
-      ? (fullConfig.tools as Record<string, unknown>)
-      : {};
-    const existingToolsSessions = isRecord(existingTools.sessions)
-      ? (existingTools.sessions as Record<string, unknown>)
-      : {};
-    const existingCron = isRecord(fullConfig.cron)
-      ? (fullConfig.cron as Record<string, unknown>)
-      : {};
-    const existingHooks = isRecord(fullConfig.hooks)
-      ? (fullConfig.hooks as Record<string, unknown>)
-      : {};
-
-    const commandsPayload = buildCommandsPayload(managedCommands);
-    const mergedCommands: Record<string, unknown> = {
-      ...existingCommands,
-      ...commandsPayload,
-    };
-    if ("allowFrom" in commandsPayload) {
-      const existingAllowFrom = isRecord(existingCommands.allowFrom)
-        ? (existingCommands.allowFrom as Record<string, unknown>)
-        : {};
-      const payloadAllowFrom = isRecord(commandsPayload.allowFrom)
-        ? (commandsPayload.allowFrom as Record<string, unknown>)
-        : {};
-      mergedCommands.allowFrom = {
-        ...existingAllowFrom,
-        ...payloadAllowFrom,
-      };
-    }
-
-    const groupChatSource = isRecord(existingMessages.groupChat)
-      ? (existingMessages.groupChat as Record<string, unknown>)
-      : {};
-    const mergedMessages: Record<string, unknown> = {
-      ...existingMessages,
-      groupChat: {
-        ...groupChatSource,
-      },
-    };
-    if (managedMessages.groupChatHistoryLimitEnabled) {
-      (mergedMessages.groupChat as Record<string, unknown>).historyLimit =
-        Math.max(0, Math.trunc(managedMessages.groupChatHistoryLimit));
-    } else {
-      delete (mergedMessages.groupChat as Record<string, unknown>).historyLimit;
-      if (
-        Object.keys(mergedMessages.groupChat as Record<string, unknown>)
-          .length === 0
-      ) {
-        delete mergedMessages.groupChat;
-      }
-    }
-
-    const webPayload = buildWebPayload(managedWeb);
-    const reconnectPayload = isRecord(webPayload.reconnect)
-      ? (webPayload.reconnect as Record<string, unknown>)
-      : {};
-    const mergedWeb: Record<string, unknown> = {
-      ...existingWeb,
-      ...webPayload,
-      reconnect: {
-        ...(isRecord(existingWeb.reconnect)
-          ? (existingWeb.reconnect as Record<string, unknown>)
-          : {}),
-        ...reconnectPayload,
-      },
-    };
-
-    const toolsPayload = buildToolsPayload(managedTools);
-    const mergedTools: Record<string, unknown> = {
-      ...existingTools,
-      ...toolsPayload,
-      sessions: {
-        ...existingToolsSessions,
-        ...(isRecord(toolsPayload.sessions)
-          ? (toolsPayload.sessions as Record<string, unknown>)
-          : {}),
-      },
-    };
-
-    const heartbeatPayload = buildHeartbeatPayload(managedHeartbeat);
-    const cronPayload = buildCronPayload(managedCron);
-    const hooksPayload = buildHooksPayload(managedHooks);
-
-    const merged = {
-      ...fullConfig,
-      agents: {
-        ...existingAgents,
-        list: agentsList,
-        defaults: {
-          ...existingAgentsDefaults,
-          heartbeat: {
-            ...existingHeartbeat,
-            ...heartbeatPayload,
-          },
-        },
-      },
-      bindings: bindingsPayload as unknown as Record<string, unknown>,
-      gateway: {
-        ...(isRecord(fullConfig.gateway)
-          ? (fullConfig.gateway as Record<string, unknown>)
-          : {}),
-        port: managedGateway.port,
-        bind: managedGateway.bind,
-        trustedProxies: managedGateway.trustedProxies,
-        reload: {
-          ...(isRecord(fullConfig.gateway) &&
-          isRecord((fullConfig.gateway as Record<string, unknown>).reload)
-            ? ((fullConfig.gateway as Record<string, unknown>).reload as Record<
-                string,
-                unknown
-              >)
-            : {}),
-          mode: managedGateway.reloadMode,
-        },
-      },
-      commands: mergedCommands,
-      messages: mergedMessages,
-      web: mergedWeb,
-      tools: mergedTools,
-      cron: {
-        ...existingCron,
-        ...cronPayload,
-      },
-      hooks: {
-        ...existingHooks,
-        ...hooksPayload,
-      },
-    };
-
-    return merged as Record<string, unknown>;
+    return buildPathScopedGlobalConfigPayload({
+      fullConfig,
+      agentsList,
+      bindingsPayload,
+      managedGateway,
+      managedCommands,
+      managedMessages,
+      managedWeb,
+      managedTools,
+      managedHeartbeat,
+      managedCron,
+      managedHooks,
+    });
   };
 
   const buildInputConfigPayload = (): {
