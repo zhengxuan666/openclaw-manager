@@ -1,7 +1,13 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { invokeCommand as invoke } from "../../lib/invoke";
-import { CheckCircle, XCircle, Play, Loader2, Stethoscope } from "lucide-react";
+import {
+  CheckCircle,
+  XCircle,
+  Play,
+  Loader2,
+  Stethoscope,
+} from "lucide-react";
 import clsx from "clsx";
 import { testingLogger } from "../../lib/logger";
 
@@ -11,8 +17,17 @@ interface DiagnosticResult {
   message: string;
   suggestion: string | null;
 }
+interface TestingProps {
+  asSubPage?: boolean;
+  title?: string;
+  onBackToOverview?: () => void;
+}
 
-export function Testing() {
+export function Testing({
+  asSubPage: _asSubPage = false,
+  title = "系统诊断",
+  onBackToOverview: _onBackToOverview,
+}: TestingProps) {
   const [diagnosticResults, setDiagnosticResults] = useState<
     DiagnosticResult[]
   >([]);
@@ -63,7 +78,7 @@ export function Testing() {
                 <Stethoscope size={20} className="text-purple-400" />
               </div>
               <div>
-                <h3 className="text-lg font-semibold text-white">系统诊断</h3>
+                <h3 className="text-lg font-semibold text-white">{title}</h3>
                 <p className="text-xs text-gray-500">
                   检查 OpenClaw 安装和配置状态
                 </p>

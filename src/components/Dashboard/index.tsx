@@ -13,9 +13,13 @@ import { EnvironmentStatus } from "../../App";
 interface DashboardProps {
   envStatus: EnvironmentStatus | null;
   onSetupComplete: () => void;
+  onOpenTestingCenter: () => void;
 }
-
-export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
+export function Dashboard({
+  envStatus,
+  onSetupComplete,
+  onOpenTestingCenter,
+}: DashboardProps) {
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
@@ -174,8 +178,10 @@ export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
             onStart={handleStart}
             onStop={handleStop}
             onRestart={handleRestart}
+            onOpenTestingCenter={onOpenTestingCenter}
           />
         </motion.div>
+
 
         {/* 实时日志 */}
         <motion.div variants={itemVariants}>

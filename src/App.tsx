@@ -21,9 +21,9 @@ import { Download, X, Loader2, CheckCircle, AlertCircle } from "lucide-react";
 
 export type PageType =
   | "dashboard"
+  | "testingCenter"
   | "ai"
   | "channels"
-  | "testing"
   | "logs"
   | "settings";
 
@@ -307,11 +307,12 @@ function App() {
         <Dashboard
           envStatus={envStatus}
           onSetupComplete={handleSetupComplete}
+          onOpenTestingCenter={() => handleNavigate('testingCenter')}
         />
       ),
       ai: <AIConfig />,
       channels: <Channels />,
-      testing: <Testing />,
+      testingCenter: <Testing />,
       logs: <Logs />,
       settings: <Settings onEnvironmentChange={checkEnvironment} />,
     };
@@ -419,9 +420,8 @@ function App() {
                 <div>
                   {updateResult ? (
                     <p
-                      className={`text-sm font-medium ${
-                        updateResult.success ? "text-green-100" : "text-red-100"
-                      }`}
+                      className={`text-sm font-medium ${updateResult.success ? "text-green-100" : "text-red-100"
+                        }`}
                     >
                       {updateResult.message}
                     </p>
