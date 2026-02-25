@@ -27,6 +27,24 @@ import { createLogger } from "../../lib/logger";
 const agentLogger = createLogger("Agent");
 const BINDING_KEY_SEPARATOR = "::";
 
+interface DefaultsQuickLink {
+  key: string;
+  label: string;
+}
+
+const DEFAULTS_QUICK_LINKS: DefaultsQuickLink[] = [
+  { key: "model", label: "默认模型策略（model）" },
+  { key: "models", label: "默认模型池（models）" },
+  { key: "heartbeat", label: "心跳策略（heartbeat）" },
+  { key: "maxConcurrent", label: "并发上限（maxConcurrent）" },
+  { key: "contextPruning", label: "上下文裁剪（contextPruning）" },
+];
+
+export interface ModelProviderGroup {
+  provider: string;
+  models: string[];
+}
+
 export interface AgentCenterDataState {
   loading: boolean;
   refreshing: boolean;
@@ -39,6 +57,7 @@ export interface AgentCenterDataState {
   bindingsMap: Record<string, string>;
   gatewaySummary: GatewaySummary;
   defaultScopeKeys: string[];
+  modelProviderGroups: ModelProviderGroup[];
 }
 
 export interface AgentCenterDataActions {
@@ -424,9 +443,14 @@ function buildDuplicatedAgentId(
   return `${normalizedBase}-copy-${index}`;
 }
 
-type EditableModelStringField = "primary" | "fallback";
+type EditableModelStringField = "primary";
+type EditableModelListField = "fallback";
+type LegacyEditableModelListField = "fallbacks";
 type EditableModelNumberField = "temperature" | "top_p" | "max_tokens";
-type EditableModelField = EditableModelStringField | EditableModelNumberField;
+type EditableModelField =
+  | EditableModelStringField
+  | EditableModelListField
+  | EditableModelNumberField;
 type EditableToolsListField = "allow" | "deny" | "elevated";
 type EditableSandboxField =
   | "mode"
@@ -434,12 +458,19 @@ type EditableSandboxField =
   | "scope"
   | "workspaceRoot";
 
-const MODEL_EDITABLE_FIELDS: EditableModelField[] = [
-  "primary",
-  "fallback",
+const MODEL_STRING_EDITABLE_FIELDS: EditableModelStringField[] = ["primary"];
+const MODEL_LIST_EDITABLE_FIELDS: EditableModelListField[] = ["fallback"];
+const MODEL_LEGACY_LIST_FIELDS: LegacyEditableModelListField[] = ["fallbacks"];
+const MODEL_NUMBER_EDITABLE_FIELDS: EditableModelNumberField[] = [
   "temperature",
   "top_p",
   "max_tokens",
+];
+
+const MODEL_EDITABLE_FIELDS: EditableModelField[] = [
+  ...MODEL_STRING_EDITABLE_FIELDS,
+  ...MODEL_LIST_EDITABLE_FIELDS,
+  ...MODEL_NUMBER_EDITABLE_FIELDS,
 ];
 
 const TOOLS_EDITABLE_FIELDS: EditableToolsListField[] = [
@@ -516,9 +547,9 @@ function getAgentModelRecord(agent: VisualAgent): Record<string, unknown> {
   return isRecord(agent.extra.model) ? { ...agent.extra.model } : {};
 }
 
-function readAgentModelField(
+function readAgentModelStringField(
   agent: VisualAgent,
-  field: EditableModelField
+  field: EditableModelStringField
 ): string {
   const value = getAgentModelRecord(agent)[field];
 
@@ -526,11 +557,61 @@ function readAgentModelField(
     return value.trim();
   }
 
+  return "";
+}
+
+function readAgentModelListField(
+  agent: VisualAgent,
+  field: EditableModelListField
+): string[] {
+  const model = getAgentModelRecord(agent);
+  const value = model[field];
+  const parsed = parseStringListFromUnknown(value);
+
+  if (parsed.length > 0) {
+    return parsed;
+  }
+
+  for (const legacyField of MODEL_LEGACY_LIST_FIELDS) {
+    const legacyParsed = parseStringListFromUnknown(model[legacyField]);
+    if (legacyParsed.length > 0) {
+      return legacyParsed;
+    }
+  }
+
+  return [];
+}
+
+function readAgentModelNumberField(
+  agent: VisualAgent,
+  field: EditableModelNumberField
+): string {
+  const value = getAgentModelRecord(agent)[field];
+
   if (typeof value === "number" && Number.isFinite(value)) {
     return String(value);
   }
 
   return "";
+}
+
+function readAgentModelField(
+  agent: VisualAgent,
+  field: EditableModelField
+): string {
+  if (
+    MODEL_STRING_EDITABLE_FIELDS.includes(field as EditableModelStringField)
+  ) {
+    return readAgentModelStringField(agent, field as EditableModelStringField);
+  }
+
+  if (MODEL_LIST_EDITABLE_FIELDS.includes(field as EditableModelListField)) {
+    return formatStringListForInput(
+      readAgentModelListField(agent, field as EditableModelListField)
+    );
+  }
+
+  return readAgentModelNumberField(agent, field as EditableModelNumberField);
 }
 
 function readAgentUnknownModelConfig(
@@ -663,6 +744,92 @@ function parseModelNumberField(
   return { ok: true, value: parsed };
 }
 
+export function parseModelProviderGroups(
+  providers: unknown,
+  availableModels: unknown
+): ModelProviderGroup[] {
+  const providerOrder: string[] = [];
+  const grouped = new Map<string, Set<string>>();
+
+  const ensureProvider = (provider: string): Set<string> => {
+    if (!grouped.has(provider)) {
+      grouped.set(provider, new Set<string>());
+      providerOrder.push(provider);
+    }
+    return grouped.get(provider)!;
+  };
+
+  const tryAddModel = (fullModelId: string) => {
+    const trimmedModelId = fullModelId.trim();
+    if (!trimmedModelId) {
+      return;
+    }
+
+    const slashIndex = trimmedModelId.indexOf("/");
+    if (slashIndex <= 0 || slashIndex >= trimmedModelId.length - 1) {
+      return;
+    }
+
+    const provider = trimmedModelId.slice(0, slashIndex).trim();
+    if (!provider) {
+      return;
+    }
+
+    ensureProvider(provider).add(trimmedModelId);
+  };
+
+  if (isRecord(providers)) {
+    Object.entries(providers).forEach(([providerName, providerConfig]) => {
+      const trimmedProviderName = providerName.trim();
+      if (!trimmedProviderName) {
+        return;
+      }
+
+      const providerModels = ensureProvider(trimmedProviderName);
+      const models =
+        isRecord(providerConfig) && Array.isArray(providerConfig.models)
+          ? providerConfig.models
+          : [];
+
+      models.forEach((model) => {
+        if (!isRecord(model) || typeof model.id !== "string") {
+          return;
+        }
+
+        const modelId = model.id.trim();
+        if (!modelId) {
+          return;
+        }
+
+        providerModels.add(`${trimmedProviderName}/${modelId}`);
+      });
+    });
+  }
+
+  if (Array.isArray(availableModels)) {
+    availableModels.forEach((item) => {
+      if (typeof item === "string") {
+        tryAddModel(item);
+      }
+    });
+  } else if (isRecord(availableModels)) {
+    Object.keys(availableModels).forEach((modelId) => {
+      tryAddModel(modelId);
+    });
+  }
+
+  return providerOrder
+    .map((provider) => {
+      const models = Array.from(grouped.get(provider) ?? []);
+      models.sort((left, right) => left.localeCompare(right));
+      return {
+        provider,
+        models,
+      };
+    })
+    .filter((item) => item.models.length > 0);
+}
+
 export function AgentCenter({
   onOpenSettings,
   onOpenChannels,
@@ -686,6 +853,7 @@ export function AgentCenter({
     bindingsMap,
     gatewaySummary,
     defaultScopeKeys,
+    modelProviderGroups,
   } = dataState;
   const {
     setError,
@@ -893,6 +1061,35 @@ export function AgentCenter({
     0
   );
 
+  const availableDefaultsQuickLinks = useMemo(
+    () =>
+      DEFAULTS_QUICK_LINKS.filter((item) =>
+        defaultScopeKeys.includes(item.key)
+      ),
+    [defaultScopeKeys]
+  );
+
+  const hiddenDefaultsQuickLinkCount = Math.max(
+    defaultScopeKeys.length - availableDefaultsQuickLinks.length,
+    0
+  );
+
+  const flattenedModelOptions = useMemo(
+    () =>
+      modelProviderGroups.flatMap((group) =>
+        group.models.map((model) => ({
+          provider: group.provider,
+          model,
+        }))
+      ),
+    [modelProviderGroups]
+  );
+
+  const fallbackModelOptionSet = useMemo(
+    () => new Set(flattenedModelOptions.map((item) => item.model)),
+    [flattenedModelOptions]
+  );
+
   const changeSummary = useMemo<AgentChangeSummary>(() => {
     const normalizedCurrent = normalizeVisualAgents(agents);
     const normalizedBaseline = normalizeVisualAgents(baselineAgents);
@@ -1076,12 +1273,22 @@ export function AgentCenter({
     setError(null);
     setMessage(null);
 
-    let parsedValue: string | number | undefined;
-    if (field === "primary" || field === "fallback") {
+    let parsedValue: string | string[] | number | undefined;
+    if (
+      MODEL_STRING_EDITABLE_FIELDS.includes(field as EditableModelStringField)
+    ) {
       const normalized = rawValue.trim();
       parsedValue = normalized ? normalized : undefined;
+    } else if (
+      MODEL_LIST_EDITABLE_FIELDS.includes(field as EditableModelListField)
+    ) {
+      const parsedListValue = parseListInput(rawValue);
+      parsedValue = parsedListValue.length > 0 ? parsedListValue : undefined;
     } else {
-      const parsedResult = parseModelNumberField(field, rawValue);
+      const parsedResult = parseModelNumberField(
+        field as EditableModelNumberField,
+        rawValue
+      );
       if (!parsedResult.ok) {
         setError(parsedResult.error);
         return;
@@ -1100,6 +1307,14 @@ export function AgentCenter({
           delete model[field];
         } else {
           model[field] = parsedValue;
+
+          if (
+            MODEL_LIST_EDITABLE_FIELDS.includes(field as EditableModelListField)
+          ) {
+            MODEL_LEGACY_LIST_FIELDS.forEach((legacyField) => {
+              delete model[legacyField];
+            });
+          }
         }
 
         const nextExtra = { ...agent.extra };
@@ -1382,7 +1597,7 @@ export function AgentCenter({
     if (!activeAgent) {
       return {
         primary: "",
-        fallback: "",
+        fallback: [] as string[],
         temperature: "",
         top_p: "",
         max_tokens: "",
@@ -1391,14 +1606,24 @@ export function AgentCenter({
     }
 
     return {
-      primary: readAgentModelField(activeAgent, "primary"),
-      fallback: readAgentModelField(activeAgent, "fallback"),
-      temperature: readAgentModelField(activeAgent, "temperature"),
-      top_p: readAgentModelField(activeAgent, "top_p"),
-      max_tokens: readAgentModelField(activeAgent, "max_tokens"),
+      primary: readAgentModelStringField(activeAgent, "primary"),
+      fallback: readAgentModelListField(activeAgent, "fallback"),
+      temperature: readAgentModelNumberField(activeAgent, "temperature"),
+      top_p: readAgentModelNumberField(activeAgent, "top_p"),
+      max_tokens: readAgentModelNumberField(activeAgent, "max_tokens"),
       unknownFieldsCount: countAgentUnknownModelFields(activeAgent),
     };
   }, [activeAgent]);
+
+  const fallbackModelMissingOptions = useMemo(() => {
+    if (!activeAgent) {
+      return [] as string[];
+    }
+
+    return activeAgentModel.fallback.filter(
+      (modelId) => !fallbackModelOptionSet.has(modelId)
+    );
+  }, [activeAgent, activeAgentModel.fallback, fallbackModelOptionSet]);
 
   const activeAgentTools = useMemo(() => {
     if (!activeAgent) {
@@ -1567,49 +1792,176 @@ export function AgentCenter({
               </div>
 
               <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-semibold text-white">
+                      默认策略入口（agents.defaults.*）
+                    </h3>
+                    <p className="mt-2 text-sm text-gray-400">
+                      Agent 详情页当前不直接写入 defaults，建议通过 Settings
+                      统一编辑。
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={onOpenSettings}
+                    className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-200 transition-colors hover:bg-dark-600"
+                  >
+                    <Settings2 size={12} />
+                    跳转 Settings
+                  </button>
+                </div>
+
+                {availableDefaultsQuickLinks.length > 0 ? (
+                  <>
+                    <p className="mt-3 text-xs text-gray-400">
+                      已检测到 {availableDefaultsQuickLinks.length} 项常见
+                      defaults 字段：
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {availableDefaultsQuickLinks.map((item) => (
+                        <span
+                          key={item.key}
+                          className="rounded-md border border-dark-500 bg-dark-600 px-2 py-1 text-xs text-gray-200"
+                        >
+                          {item.label}
+                        </span>
+                      ))}
+                    </div>
+                    {hiddenDefaultsQuickLinkCount > 0 && (
+                      <p className="mt-2 text-xs text-gray-500">
+                        另有 {hiddenDefaultsQuickLinkCount}{" "}
+                        项默认字段未在快捷入口中展示，请前往 Settings
+                        查看完整配置。
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="mt-3 text-xs text-gray-500">
+                    当前未检测到常见 defaults 字段，可前往 Settings 检查并补全。
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
                 <h3 className="text-lg font-semibold text-white">
                   模型策略（agents.list[i].model）
                 </h3>
                 <p className="mt-2 text-sm text-gray-400">
-                  支持 primary / fallback / temperature / top_p / max_tokens
-                  编辑，未知字段会保留在原配置中。
+                  主模型改为从可用模型中单选，回退模型支持多选（按 provider
+                  分组），temperature / top_p / max_tokens 继续保留数值编辑。
                 </p>
 
+                {flattenedModelOptions.length === 0 ? (
+                  <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                    未检测到可用模型（agents.defaults.models /
+                    models.providers），请先在 AI 模型配置中补全模型清单。
+                  </div>
+                ) : (
+                  <div className="mt-3 space-y-4">
+                    <label className="flex flex-col gap-1 text-xs text-gray-300">
+                      <span className="text-gray-400">
+                        主模型（primary，单选）
+                      </span>
+                      <select
+                        value={activeAgentModel.primary}
+                        onChange={(event) =>
+                          handleUpdateAgentModelField(
+                            activeAgent.id,
+                            "primary",
+                            event.target.value
+                          )
+                        }
+                        className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white focus:border-claw-500 focus:outline-none"
+                      >
+                        <option value="">未设置</option>
+                        {modelProviderGroups.map((group) => (
+                          <optgroup key={group.provider} label={group.provider}>
+                            {group.models.map((modelId) => (
+                              <option key={modelId} value={modelId}>
+                                {modelId}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </label>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-gray-400">
+                          回退模型（fallback，多选）
+                        </span>
+                        <span className="text-[11px] text-gray-500">
+                          已选 {activeAgentModel.fallback.length} 个
+                        </span>
+                      </div>
+
+                      <div className="rounded-lg border border-dark-500 bg-dark-700/40 p-3">
+                        <div className="space-y-3">
+                          {modelProviderGroups.map((group) => (
+                            <div key={group.provider} className="space-y-2">
+                              <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                                {group.provider}
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                {group.models.map((modelId) => {
+                                  const checked =
+                                    activeAgentModel.fallback.includes(modelId);
+                                  const nextValues = checked
+                                    ? activeAgentModel.fallback.filter(
+                                        (item) => item !== modelId
+                                      )
+                                    : [...activeAgentModel.fallback, modelId];
+
+                                  return (
+                                    <label
+                                      key={modelId}
+                                      className={clsx(
+                                        "inline-flex min-h-[32px] cursor-pointer items-center gap-2 rounded-md border px-2 py-1 text-xs transition-colors",
+                                        checked
+                                          ? "border-claw-500/50 bg-claw-500/15 text-claw-200"
+                                          : "border-dark-500 bg-dark-700 text-gray-300 hover:bg-dark-600"
+                                      )}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={() =>
+                                          handleUpdateAgentModelField(
+                                            activeAgent.id,
+                                            "fallback",
+                                            formatStringListForInput(nextValues)
+                                          )
+                                        }
+                                        className="h-3.5 w-3.5 rounded border-dark-500 bg-dark-700 text-claw-500"
+                                      />
+                                      <span className="break-all">
+                                        {modelId}
+                                      </span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {fallbackModelMissingOptions.length > 0 && (
+                        <p className="text-xs text-amber-300">
+                          当前 fallback 含 {fallbackModelMissingOptions.length}
+                          个未出现在可选列表中的模型：
+                          {fallbackModelMissingOptions.slice(0, 3).join("、")}
+                          {fallbackModelMissingOptions.length > 3 ? " ..." : ""}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">主模型（primary）</span>
-                    <input
-                      type="text"
-                      value={activeAgentModel.primary}
-                      onChange={(event) =>
-                        handleUpdateAgentModelField(
-                          activeAgent.id,
-                          "primary",
-                          event.target.value
-                        )
-                      }
-                      placeholder="例如 openai/gpt-5"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">回退模型（fallback）</span>
-                    <input
-                      type="text"
-                      value={activeAgentModel.fallback}
-                      onChange={(event) =>
-                        handleUpdateAgentModelField(
-                          activeAgent.id,
-                          "fallback",
-                          event.target.value
-                        )
-                      }
-                      placeholder="例如 anthropic/claude-sonnet"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-
                   <label className="flex flex-col gap-1 text-xs text-gray-300">
                     <span className="text-gray-400">temperature（0~2）</span>
                     <input
@@ -2084,6 +2436,10 @@ export function AgentCenter({
                   {hiddenDefaultScopeCount > 0
                     ? ` · +${hiddenDefaultScopeCount} 项`
                     : ""}
+                </p>
+                <p className="mt-2 text-xs text-gray-500">
+                  defaults 写入入口已统一到 Settings，Agent
+                  模块仅提供可读摘要与跳转入口。
                 </p>
               </>
             ) : (

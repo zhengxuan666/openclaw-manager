@@ -289,8 +289,11 @@ function App() {
 
   const handleNavigate = (page: PageType) => {
     if (currentPage === "agent" && page !== "agent" && agentCenterDirty) {
+      const isConflictProneTarget = page === "settings" || page === "channels";
       const confirmed = window.confirm(
-        "智能体模块存在未保存变更，确认离开并放弃这些更改吗？"
+        isConflictProneTarget
+          ? "智能体模块存在未保存草稿。即将进入 Settings/Channels（同样可能写入 agents.list、agents.defaults 与 bindings），继续操作可能产生跨模块配置冲突。建议先在智能体模块应用或撤销后再跳转。确认继续吗？未保存草稿会保留在当前会话。"
+          : "智能体模块存在未保存草稿，确认离开当前页面吗？未保存草稿会保留在当前会话。"
       );
       if (!confirmed) {
         return;
