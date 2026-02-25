@@ -2,7 +2,7 @@
 
 > 更新时间：2026-02-25
 > 适用范围：`/home/openclaw-manager`
-> 当前状态：M1/M2/M3 已完成并已部署验证，M4 增强持续推进中（已完成 bindings/get_config 降级容错、批量删除与批量复制、模型/工具/sandbox 分区编辑、详情页 bindings 引用与 Channels 跳转）
+> 当前状态：M1/M2/M3/M4 已完成并已部署验证（P0/P1/P2 全部落地：bindings/get_config 降级容错、批量删除与批量复制、模型/工具/sandbox 分区编辑、详情页 bindings 引用与 Channels 跳转、defaults 统一入口与分区跳转、覆盖优先级提示、保存前分区级校验与差异预检）
 
 ## 1. 已确认决策（冻结）
 
@@ -180,10 +180,10 @@
   2. ✅ `agents.list[i].tools` 可视化编辑（allow/deny/elevated）
   3. ✅ `agents.list[i].sandbox` 可视化编辑与 workspace 关联校验
   4. ✅ 详情页 bindings 引用详情与“跳转 Channels”闭环
-- P2（收敛入口与体验增强）
-  1. 补充 `agents.defaults.*` 在详情页的“可读 + 跳转”统一入口（先不直写）
-  2. 评估 Settings/Channels 与 Agent 模块的职责收敛方案，减少双入口写冲突
-  3. 增加保存前依赖分析与分区级冲突提示
+- P2（收敛入口与体验增强，已完成）
+  1. ✅ 补充 `agents.defaults.*` 在详情页的"可读 + 跳转"统一入口（可点击快捷链接直达 Settings 对应分区，显示实际值摘要）
+  2. ✅ 覆盖优先级提示（模型/工具/sandbox 分区显示"覆盖 defaults"指示器，明确优先级关系）
+  3. ✅ 保存前分区级校验与差异预检（tools 冲突/sandbox 缺路径阻断保存，model 警告弹 confirm，变更摘要面板实时预检）
 
 ---
 
@@ -206,10 +206,17 @@
 
 ### 里程碑 M4（增强迭代）
 
-- 状态：🚧 进行中（已完成字段级差异预览、bindings/get_config 降级容错、批量删除草稿 Agent、批量复制草稿 Agent、模型/工具/sandbox 分区编辑、详情页 bindings 引用明细 + Channels 跳转）
-- 当前重点：P2 收敛项（`agents.defaults.*` 统一入口、跨模块冲突提示、保存前依赖分析）
-- 最新验证：2026-02-25 已通过 `npm run build`、`npm run web:build`，并完成 `bash scripts/1panel_web_start.sh` 与 `curl -i http://127.0.0.1:17890/api/health`（200 OK）
-- 后续候选：详情页配置预检、分区级冲突提示、保存前依赖分析
+- 状态：✅ 已完成（P0/P1/P2 全部落地）
+- 完成内容：
+  - 字段级差异预览、bindings/get_config 降级容错
+  - 批量删除草稿 Agent、批量复制草稿 Agent
+  - 模型/工具/sandbox 分区编辑
+  - 详情页 bindings 引用明细 + Channels 跳转
+  - `agents.defaults.*` 统一入口（可点击快捷链接直达 Settings 对应分区，显示实际值摘要）
+  - 覆盖优先级提示（模型/工具/sandbox 分区显示"覆盖 defaults"指示器）
+  - 保存前分区级校验（tools 冲突/sandbox 缺路径阻断保存，model 警告弹 confirm）
+  - 差异预览面板实时分区预检
+- 最新验证：2026-02-25 已通过 `npm run build`
 
 ---
 

@@ -23,9 +23,9 @@ interface InstallResult {
   message: string;
   error?: string;
 }
-
 interface SettingsProps {
   onEnvironmentChange?: () => void;
+  initialConfigCenterTab?: "agent" | "routing" | "runtime" | "advanced";
 }
 
 type BindingEntry = {
@@ -2176,7 +2176,9 @@ export function buildPathScopedGlobalConfigPayload(
     setConfigPathValue(merged, ["bindings"], bindingsPayload);
   }
 
-  const existingGateway = normalizeManagedGateway(parseGatewayConfig(fullConfig));
+  const existingGateway = normalizeManagedGateway(
+    parseGatewayConfig(fullConfig)
+  );
   if (existingGateway.port !== managedGateway.port) {
     setConfigPathValue(merged, ["gateway", "port"], managedGateway.port);
   }
@@ -2189,12 +2191,18 @@ export function buildPathScopedGlobalConfigPayload(
       managedGateway.trustedProxies
     )
   ) {
-    setConfigPathValue(merged, ["gateway", "trustedProxies"], [
-      ...managedGateway.trustedProxies,
-    ]);
+    setConfigPathValue(
+      merged,
+      ["gateway", "trustedProxies"],
+      [...managedGateway.trustedProxies]
+    );
   }
   if (existingGateway.reloadMode !== managedGateway.reloadMode) {
-    setConfigPathValue(merged, ["gateway", "reload", "mode"], managedGateway.reloadMode);
+    setConfigPathValue(
+      merged,
+      ["gateway", "reload", "mode"],
+      managedGateway.reloadMode
+    );
   }
 
   const existingCommands = normalizeManagedCommands(
@@ -2234,7 +2242,11 @@ export function buildPathScopedGlobalConfigPayload(
     managedCommands.restart !== undefined &&
     managedCommands.restart !== existingCommands.restart
   ) {
-    setConfigPathValue(merged, ["commands", "restart"], managedCommands.restart);
+    setConfigPathValue(
+      merged,
+      ["commands", "restart"],
+      managedCommands.restart
+    );
   }
   if (
     managedCommands.useAccessGroups !== undefined &&
@@ -2260,14 +2272,20 @@ export function buildPathScopedGlobalConfigPayload(
     );
   }
 
-  const existingMessages = normalizeManagedMessages(parseMessagesConfig(fullConfig));
+  const existingMessages = normalizeManagedMessages(
+    parseMessagesConfig(fullConfig)
+  );
   if (managedMessages.groupChatHistoryLimitEnabled) {
     if (
       !existingMessages.groupChatHistoryLimitEnabled ||
       existingMessages.groupChatHistoryLimit !==
         managedMessages.groupChatHistoryLimit
     ) {
-      setConfigPathValue(merged, ["messages", "groupChat", "historyLimit"], Math.max(0, Math.trunc(managedMessages.groupChatHistoryLimit)));
+      setConfigPathValue(
+        merged,
+        ["messages", "groupChat", "historyLimit"],
+        Math.max(0, Math.trunc(managedMessages.groupChatHistoryLimit))
+      );
     }
   } else if (existingMessages.groupChatHistoryLimitEnabled) {
     deleteConfigPathValue(merged, ["messages", "groupChat", "historyLimit"]);
@@ -2331,9 +2349,7 @@ export function buildPathScopedGlobalConfigPayload(
   if (!isComparableValueEqual(existingTools.deny, managedTools.deny)) {
     setConfigPathValue(merged, ["tools", "deny"], [...managedTools.deny]);
   }
-  if (
-    existingTools.sessionsVisibility !== managedTools.sessionsVisibility
-  ) {
+  if (existingTools.sessionsVisibility !== managedTools.sessionsVisibility) {
     setConfigPathValue(
       merged,
       ["tools", "sessions", "visibility"],
@@ -2411,7 +2427,10 @@ export function buildPathScopedGlobalConfigPayload(
     );
   }
   if (
-    !isComparableValueEqual(existingCron.sessionRetention, managedCron.sessionRetention)
+    !isComparableValueEqual(
+      existingCron.sessionRetention,
+      managedCron.sessionRetention
+    )
   ) {
     setConfigPathValue(
       merged,
@@ -2460,7 +2479,10 @@ export function buildPathScopedGlobalConfigPayload(
   return merged;
 }
 
-export function Settings({ onEnvironmentChange }: SettingsProps) {
+export function Settings({
+  onEnvironmentChange,
+  initialConfigCenterTab,
+}: SettingsProps) {
   const [identity, setIdentity] = useState({
     botName: "Clawd",
     userName: "主人",
@@ -2581,6 +2603,13 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
     useState<ConfigCenterView>("general");
   const [activeCenterTab, setActiveCenterTab] =
     useState<ConfigCenterTab>("agent");
+
+  useEffect(() => {
+    if (initialConfigCenterTab) {
+      setActiveCenterTab(initialConfigCenterTab);
+    }
+  }, [initialConfigCenterTab]);
+
   const [runtimeDocExpanded, setRuntimeDocExpanded] = useState<
     Record<RuntimeSectionKey, boolean>
   >({

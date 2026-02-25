@@ -30,14 +30,87 @@ const BINDING_KEY_SEPARATOR = "::";
 interface DefaultsQuickLink {
   key: string;
   label: string;
+  settingsTab: "agent" | "routing" | "runtime" | "advanced";
+  valueSummary?: (defaults: Record<string, unknown>) => string;
 }
 
 const DEFAULTS_QUICK_LINKS: DefaultsQuickLink[] = [
-  { key: "model", label: "默认模型策略（model）" },
-  { key: "models", label: "默认模型池（models）" },
-  { key: "heartbeat", label: "心跳策略（heartbeat）" },
-  { key: "maxConcurrent", label: "并发上限（maxConcurrent）" },
-  { key: "contextPruning", label: "上下文裁剪（contextPruning）" },
+  {
+    key: "model",
+    label: "默认模型策略（model）",
+    settingsTab: "agent",
+    valueSummary: (defaults) => {
+      const model = defaults.model;
+      if (typeof model === "object" && model !== null) {
+        const m = model as Record<string, unknown>;
+        if (typeof m.primary === "string" && m.primary.trim()) {
+          return `primary: ${m.primary}`;
+        }
+      }
+      return "未配置";
+    },
+  },
+  {
+    key: "models",
+    label: "默认模型池（models）",
+    settingsTab: "agent",
+    valueSummary: (defaults) => {
+      const models = defaults.models;
+      if (Array.isArray(models)) {
+        return `${models.length} 个模型`;
+      }
+      if (typeof models === "object" && models !== null) {
+        const count = Object.keys(models).length;
+        return count > 0 ? `${count} 个模型` : "无模型";
+      }
+      return "未配置";
+    },
+  },
+  {
+    key: "heartbeat",
+    label: "心跳策略（heartbeat）",
+    settingsTab: "runtime",
+    valueSummary: (defaults) => {
+      const hb = defaults.heartbeat;
+      if (typeof hb === "object" && hb !== null) {
+        const h = hb as Record<string, unknown>;
+        const interval = typeof h.interval === "number" ? `${h.interval}s` : "";
+        return interval ? `interval: ${interval}` : "已配置";
+      }
+      return "未配置";
+    },
+  },
+  {
+    key: "maxConcurrent",
+    label: "并发上限（maxConcurrent）",
+    settingsTab: "runtime",
+    valueSummary: (defaults) => {
+      const val = defaults.maxConcurrent;
+      if (typeof val === "number") {
+        return `${val}`;
+      }
+      return "未配置";
+    },
+  },
+  {
+    key: "contextPruning",
+    label: "上下文裁剪（contextPruning）",
+    settingsTab: "runtime",
+    valueSummary: (defaults) => {
+      const val = defaults.contextPruning;
+      if (typeof val === "object" && val !== null) {
+        return "已配置";
+      }
+      if (
+        typeof val === "string" ||
+        typeof val === "number" ||
+        typeof val === "boolean"
+      ) {
+        return String(val);
+      }
+      return "未配置";
+    },
+  },
 ];
 
 export interface ModelProviderGroup {
@@ -58,6 +131,7 @@ export interface AgentCenterDataState {
   gatewaySummary: GatewaySummary;
   defaultScopeKeys: string[];
   modelProviderGroups: ModelProviderGroup[];
+  defaultsRecord: Record<string, unknown>;
 }
 
 export interface AgentCenterDataActions {
@@ -70,7 +144,7 @@ export interface AgentCenterDataActions {
 }
 
 interface AgentCenterProps {
-  onOpenSettings: () => void;
+  onOpenSettings: (settingsTab?: string) => void;
   onOpenChannels?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
   viewMode?: "list" | "workspace";
@@ -378,6 +452,80 @@ export function validateAgents(agents: VisualAgent[]): string | null {
 
   return null;
 }
+
+interface SectionValidationIssue {
+  agentId: string;
+  section: "tools" | "sandbox" | "model";
+  level: "error" | "warning";
+  message: string;
+}
+
+function validateAgentsSectioned(
+  agents: VisualAgent[]
+): SectionValidationIssue[] {
+  const issues: SectionValidationIssue[] = [];
+
+  for (const agent of agents) {
+    // 1. tools.allow/deny 冲突检查
+    if (isRecord(agent.extra.tools)) {
+      const tools = agent.extra.tools;
+      const allow = parseStringListFromUnknown(tools.allow);
+      const deny = parseStringListFromUnknown(tools.deny);
+      const conflict = findToolsListConflict(allow, deny);
+      if (conflict) {
+        issues.push({
+          agentId: agent.id,
+          section: "tools",
+          level: "error",
+          message: `tools.allow/deny 冲突：「${conflict}」同时存在于 allow 与 deny`,
+        });
+      }
+    }
+
+    // 2. sandbox mode 非 off 但 workspace/workspaceRoot 都空
+    if (isRecord(agent.extra.sandbox)) {
+      const sandbox = agent.extra.sandbox;
+      const mode = typeof sandbox.mode === "string" ? sandbox.mode : "";
+      if (isSandboxModeRequiringWorkspace(mode)) {
+        const workspaceRoot =
+          typeof sandbox.workspaceRoot === "string"
+            ? sandbox.workspaceRoot.trim()
+            : "";
+        const agentWorkspace = agent.workspace.trim();
+        if (!workspaceRoot && !agentWorkspace) {
+          issues.push({
+            agentId: agent.id,
+            section: "sandbox",
+            level: "error",
+            message: `sandbox.mode 为「${mode}」（已启用隔离），但 workspace 与 workspaceRoot 均为空`,
+          });
+        }
+      }
+    }
+
+    // 3. model.primary 为空但有 fallback 的警告
+    if (isRecord(agent.extra.model)) {
+      const model = agent.extra.model;
+      const primary =
+        typeof model.primary === "string" ? model.primary.trim() : "";
+      const fallback = parseStringListFromUnknown(model.fallback);
+      // 也检查历史别名 fallbacks
+      const fallbacks = parseStringListFromUnknown(model.fallbacks);
+      const hasFallback = fallback.length > 0 || fallbacks.length > 0;
+      if (!primary && hasFallback) {
+        issues.push({
+          agentId: agent.id,
+          section: "model",
+          level: "warning",
+          message: "未配置主模型（primary），但已配置回退模型（fallback）",
+        });
+      }
+    }
+  }
+
+  return issues;
+}
+
 export function parseGatewaySummary(config: unknown): GatewaySummary {
   const fallback: GatewaySummary = {
     port: "18789",
@@ -854,6 +1002,7 @@ export function AgentCenter({
     gatewaySummary,
     defaultScopeKeys,
     modelProviderGroups,
+    defaultsRecord,
   } = dataState;
   const {
     setError,
@@ -1074,6 +1223,23 @@ export function AgentCenter({
     0
   );
 
+  const defaultsHasModel = useMemo(
+    () =>
+      typeof defaultsRecord.model === "object" && defaultsRecord.model !== null,
+    [defaultsRecord]
+  );
+  const defaultsHasTools = useMemo(
+    () =>
+      typeof defaultsRecord.tools === "object" && defaultsRecord.tools !== null,
+    [defaultsRecord]
+  );
+  const defaultsHasSandbox = useMemo(
+    () =>
+      typeof defaultsRecord.sandbox === "object" &&
+      defaultsRecord.sandbox !== null,
+    [defaultsRecord]
+  );
+
   const flattenedModelOptions = useMemo(
     () =>
       modelProviderGroups.flatMap((group) =>
@@ -1238,6 +1404,11 @@ export function AgentCenter({
       updatedAgents,
     };
   }, [agents, baselineAgents]);
+
+  const sectionIssuesPreview = useMemo(
+    () => validateAgentsSectioned(normalizeVisualAgents(agents)),
+    [agents]
+  );
 
   const handleUpdateAgentField = (
     targetAgentId: string,
@@ -1556,6 +1727,37 @@ export function AgentCenter({
         setError(validationError);
         return;
       }
+
+      // 分区级校验
+      const sectionIssues = validateAgentsSectioned(normalizedAgents);
+      const sectionErrors = sectionIssues.filter(
+        (issue) => issue.level === "error"
+      );
+      const sectionWarnings = sectionIssues.filter(
+        (issue) => issue.level === "warning"
+      );
+
+      if (sectionErrors.length > 0) {
+        setError(
+          `分区校验未通过：\n${sectionErrors
+            .map((issue) => `[${issue.agentId}] ${issue.message}`)
+            .join("；")}`
+        );
+        return;
+      }
+
+      if (sectionWarnings.length > 0) {
+        const warningText = sectionWarnings
+          .map((issue) => `[${issue.agentId}] ${issue.message}`)
+          .join("\n");
+        const confirmed = window.confirm(
+          `以下配置存在潜在风险，是否继续保存？\n\n${warningText}`
+        );
+        if (!confirmed) {
+          return;
+        }
+      }
+
       await persistAgents(normalizedAgents);
 
       setAgents(cloneVisualAgents(normalizedAgents));
@@ -1805,7 +2007,7 @@ export function AgentCenter({
 
                   <button
                     type="button"
-                    onClick={onOpenSettings}
+                    onClick={() => onOpenSettings()}
                     className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-200 transition-colors hover:bg-dark-600"
                   >
                     <Settings2 size={12} />
@@ -1817,16 +2019,25 @@ export function AgentCenter({
                   <>
                     <p className="mt-3 text-xs text-gray-400">
                       已检测到 {availableDefaultsQuickLinks.length} 项常见
-                      defaults 字段：
+                      defaults 字段（点击可跳转对应设置分区）：
                     </p>
                     <div className="mt-2 flex flex-wrap gap-2">
                       {availableDefaultsQuickLinks.map((item) => (
-                        <span
+                        <button
                           key={item.key}
-                          className="rounded-md border border-dark-500 bg-dark-600 px-2 py-1 text-xs text-gray-200"
+                          type="button"
+                          onClick={() => onOpenSettings(item.settingsTab)}
+                          className="group flex flex-col items-start rounded-md border border-dark-500 bg-dark-600 px-3 py-2 text-left transition-colors hover:border-claw-500/50 hover:bg-dark-500"
                         >
-                          {item.label}
-                        </span>
+                          <span className="text-xs text-gray-200 group-hover:text-claw-300">
+                            {item.label}
+                          </span>
+                          {item.valueSummary && (
+                            <span className="mt-0.5 text-[10px] text-gray-500">
+                              {item.valueSummary(defaultsRecord)}
+                            </span>
+                          )}
+                        </button>
                       ))}
                     </div>
                     {hiddenDefaultsQuickLinkCount > 0 && (
@@ -1848,6 +2059,13 @@ export function AgentCenter({
                 <h3 className="text-lg font-semibold text-white">
                   模型策略（agents.list[i].model）
                 </h3>
+                {defaultsHasModel && isRecord(activeAgent.extra.model) && (
+                  <div className="mt-1.5 flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
+                    <Layers size={10} />
+                    当前 Agent 已覆盖 defaults 中的模型策略（优先级：Agent 覆盖
+                    &gt; defaults &gt; 全局）
+                  </div>
+                )}
                 <p className="mt-2 text-sm text-gray-400">
                   主模型改为从可用模型中单选，回退模型支持多选（按 provider
                   分组），temperature / top_p / max_tokens 继续保留数值编辑。
@@ -2036,6 +2254,13 @@ export function AgentCenter({
                 <h3 className="text-lg font-semibold text-white">
                   工具策略（agents.list[i].tools）
                 </h3>
+                {defaultsHasTools && isRecord(activeAgent.extra.tools) && (
+                  <div className="mt-1.5 flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
+                    <Layers size={10} />
+                    当前 Agent 已覆盖 defaults 中的工具策略（优先级：Agent 覆盖
+                    &gt; defaults &gt; 全局）
+                  </div>
+                )}
                 <p className="mt-2 text-sm text-gray-400">
                   支持 allow / deny / elevated 三组清单编辑（换行、逗号、分号
                   均可分隔），并保留 tools 下其他未知字段。
@@ -2109,6 +2334,13 @@ export function AgentCenter({
                 <h3 className="text-lg font-semibold text-white">
                   沙箱策略（agents.list[i].sandbox）
                 </h3>
+                {defaultsHasSandbox && isRecord(activeAgent.extra.sandbox) && (
+                  <div className="mt-1.5 flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
+                    <Layers size={10} />
+                    当前 Agent 已覆盖 defaults 中的沙箱策略（优先级：Agent 覆盖
+                    &gt; defaults &gt; 全局）
+                  </div>
+                )}
                 <p className="mt-2 text-sm text-gray-400">
                   支持 mode / workspaceAccess / scope / workspaceRoot
                   编辑，并进行基础校验： 当 mode 非 off 时，至少需要 workspace
@@ -2329,7 +2561,7 @@ export function AgentCenter({
               </button>
               <button
                 type="button"
-                onClick={onOpenSettings}
+                onClick={() => onOpenSettings()}
                 className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500"
               >
                 <Settings2 size={14} />
@@ -2404,6 +2636,39 @@ export function AgentCenter({
                   <li>当前草稿未检测到可摘要的结构化变更。</li>
                 )}
             </ul>
+
+            {sectionIssuesPreview.length > 0 && (
+              <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                <p className="mb-1.5 text-xs font-medium text-amber-300">
+                  <AlertTriangle size={12} className="mr-1 inline-block" />
+                  分区预检（
+                  {
+                    sectionIssuesPreview.filter((i) => i.level === "error")
+                      .length
+                  }{" "}
+                  项阻断 /{" "}
+                  {
+                    sectionIssuesPreview.filter((i) => i.level === "warning")
+                      .length
+                  }{" "}
+                  项警告）
+                </p>
+                <ul className="list-disc space-y-0.5 pl-5 text-xs">
+                  {sectionIssuesPreview.map((issue, idx) => (
+                    <li
+                      key={`${issue.agentId}-${issue.section}-${idx}`}
+                      className={
+                        issue.level === "error"
+                          ? "text-red-300"
+                          : "text-amber-200"
+                      }
+                    >
+                      [{issue.agentId}] {issue.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
 

@@ -117,6 +117,7 @@ const createInitialDataState = (): AgentCenterDataState => ({
   gatewaySummary: parseGatewaySummary({}),
   defaultScopeKeys: [],
   modelProviderGroups: [],
+  defaultsRecord: {},
 });
 
 interface UseAgentCenterDataResult {
@@ -139,6 +140,9 @@ export function useAgentCenterData(): UseAgentCenterDataResult {
   const [modelProviderGroups, setModelProviderGroups] = useState<
     AgentCenterDataState["modelProviderGroups"]
   >([]);
+  const [defaultsRecord, setDefaultsRecord] = useState<Record<string, unknown>>(
+    {}
+  );
 
   const reload = useCallback(async (isRefresh = false) => {
     if (isRefresh) {
@@ -237,7 +241,7 @@ export function useAgentCenterData(): UseAgentCenterDataResult {
           ? (configRecord.agents as Record<string, unknown>)
           : null;
 
-      const defaultsRecord =
+      const parsedDefaultsRecord =
         agentsRecord &&
         typeof agentsRecord.defaults === "object" &&
         agentsRecord.defaults !== null
@@ -246,7 +250,7 @@ export function useAgentCenterData(): UseAgentCenterDataResult {
 
       const modelProviderGroups = parseModelProviderGroups(
         modelsRecord?.providers,
-        defaultsRecord?.models
+        parsedDefaultsRecord?.models
       );
 
       setAgents(cloneVisualAgents(nextAgents));
@@ -255,6 +259,7 @@ export function useAgentCenterData(): UseAgentCenterDataResult {
       setGatewaySummary(parseGatewaySummary(nextConfigRaw));
       setDefaultScopeKeys(parseDefaultScopeKeys(nextConfigRaw));
       setModelProviderGroups(modelProviderGroups);
+      setDefaultsRecord(parsedDefaultsRecord ?? {});
       setWarnings(nextWarnings);
       setMessage(null);
 
@@ -388,6 +393,7 @@ export function useAgentCenterData(): UseAgentCenterDataResult {
     gatewaySummary,
     defaultScopeKeys,
     modelProviderGroups,
+    defaultsRecord,
   };
 
   const dataActions: AgentCenterDataActions = {

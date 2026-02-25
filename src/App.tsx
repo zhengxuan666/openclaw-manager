@@ -115,6 +115,9 @@ function App() {
   const [agentCenterDirty, setAgentCenterDirty] = useState(false);
   const [agentViewMode, setAgentViewMode] = useState<AgentViewMode>("list");
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    "agent" | "routing" | "runtime" | "advanced" | undefined
+  >(undefined);
   const {
     dataState: agentCenterDataState,
     dataActions: agentCenterDataActions,
@@ -320,6 +323,9 @@ function App() {
     }
 
     appLogger.action("页面切换", { from: currentPage, to: page });
+    if (page !== "settings") {
+      setSettingsInitialTab(undefined);
+    }
     setCurrentPage(page);
   };
 
@@ -365,7 +371,12 @@ function App() {
       ),
       agent: (
         <AgentCenter
-          onOpenSettings={() => handleNavigate("settings")}
+          onOpenSettings={(tab?: string) => {
+            setSettingsInitialTab(
+              tab as "agent" | "routing" | "runtime" | "advanced" | undefined
+            );
+            handleNavigate("settings");
+          }}
           onOpenChannels={() => handleNavigate("channels")}
           onDirtyChange={setAgentCenterDirty}
           viewMode={agentViewMode}
@@ -380,7 +391,12 @@ function App() {
       channels: <Channels />,
       testingCenter: <Testing />,
       logs: <Logs />,
-      settings: <Settings onEnvironmentChange={checkEnvironment} />,
+      settings: (
+        <Settings
+          onEnvironmentChange={checkEnvironment}
+          initialConfigCenterTab={settingsInitialTab}
+        />
+      ),
     };
 
     return (
