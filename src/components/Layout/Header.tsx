@@ -14,6 +14,7 @@ interface HeaderProps {
 
 const pageTitles: Record<PageType, { title: string; description: string }> = {
   dashboard: { title: "概览", description: "服务状态、日志与快捷操作" },
+  agent: { title: "智能体", description: "Default 与自定义 Agent 管理入口" },
   ai: { title: "AI 模型配置", description: "配置 AI 提供商和模型" },
   channels: {
     title: "消息渠道",

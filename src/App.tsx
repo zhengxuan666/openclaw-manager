@@ -10,6 +10,8 @@ import {
 import { Sidebar } from "./components/Layout/Sidebar";
 import { Header } from "./components/Layout/Header";
 import { Dashboard } from "./components/Dashboard";
+import { AgentCenter } from "./components/AgentCenter";
+import { useAgentCenterData } from "./components/AgentCenter/useAgentCenterData";
 import { AIConfig } from "./components/AIConfig";
 import { Channels } from "./components/Channels";
 import { Settings } from "./components/Settings";
@@ -22,10 +24,13 @@ import { Download, X, Loader2, CheckCircle, AlertCircle } from "lucide-react";
 export type PageType =
   | "dashboard"
   | "testingCenter"
+  | "agent"
   | "ai"
   | "channels"
   | "logs"
   | "settings";
+
+export type AgentViewMode = "list" | "workspace";
 
 export interface EnvironmentStatus {
   node_installed: boolean;
@@ -107,6 +112,13 @@ function App() {
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(
     null
   );
+  const [agentCenterDirty, setAgentCenterDirty] = useState(false);
+  const [agentViewMode, setAgentViewMode] = useState<AgentViewMode>("list");
+  const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
+  const {
+    dataState: agentCenterDataState,
+    dataActions: agentCenterDataActions,
+  } = useAgentCenterData();
 
   const webMode = !isTauri();
   const [authChecked, setAuthChecked] = useState(!webMode);
@@ -265,7 +277,45 @@ function App() {
     checkEnvironment();
   }, [checkEnvironment]);
 
+  const openAgentList = useCallback(() => {
+    setAgentViewMode("list");
+    setActiveAgentId(null);
+  }, []);
+
+  const openAgentWorkspace = useCallback((agentId: string) => {
+    setAgentViewMode("workspace");
+    setActiveAgentId(agentId);
+  }, []);
+
   const handleNavigate = (page: PageType) => {
+    if (currentPage === "agent" && page !== "agent" && agentCenterDirty) {
+      const confirmed = window.confirm(
+        "智能体模块存在未保存变更，确认离开并放弃这些更改吗？"
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    if (page === "agent") {
+      if (currentPage === "agent" && agentViewMode === "workspace") {
+        if (agentCenterDirty) {
+          const confirmed = window.confirm(
+            "当前 Agent 详情存在未保存变更，确认返回列表并保留草稿吗？"
+          );
+          if (!confirmed) {
+            return;
+          }
+        }
+        openAgentList();
+        return;
+      }
+
+      if (currentPage !== "agent") {
+        openAgentList();
+      }
+    }
+
     appLogger.action("页面切换", { from: currentPage, to: page });
     setCurrentPage(page);
   };
@@ -307,7 +357,20 @@ function App() {
         <Dashboard
           envStatus={envStatus}
           onSetupComplete={handleSetupComplete}
-          onOpenTestingCenter={() => handleNavigate('testingCenter')}
+          onOpenTestingCenter={() => handleNavigate("testingCenter")}
+        />
+      ),
+      agent: (
+        <AgentCenter
+          onOpenSettings={() => handleNavigate("settings")}
+          onOpenChannels={() => handleNavigate("channels")}
+          onDirtyChange={setAgentCenterDirty}
+          viewMode={agentViewMode}
+          activeAgentId={activeAgentId}
+          onOpenWorkspace={openAgentWorkspace}
+          onBackToList={openAgentList}
+          dataState={agentCenterDataState}
+          dataActions={agentCenterDataActions}
         />
       ),
       ai: <AIConfig />,
@@ -420,8 +483,9 @@ function App() {
                 <div>
                   {updateResult ? (
                     <p
-                      className={`text-sm font-medium ${updateResult.success ? "text-green-100" : "text-red-100"
-                        }`}
+                      className={`text-sm font-medium ${
+                        updateResult.success ? "text-green-100" : "text-red-100"
+                      }`}
                     >
                       {updateResult.message}
                     </p>

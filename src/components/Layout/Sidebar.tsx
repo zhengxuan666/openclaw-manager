@@ -4,6 +4,7 @@ declare const __BUILD_VERSION__: string;
 import {
   LayoutDashboard,
   Bot,
+  Sparkles,
   MessageSquare,
   ScrollText,
   Settings,
@@ -29,22 +30,23 @@ const menuItems: {
   mobileLabel: string;
   icon: React.ElementType;
 }[] = [
-    {
-      id: "dashboard",
-      label: "概览",
-      mobileLabel: "概览",
-      icon: LayoutDashboard,
-    },
-    { id: "ai", label: "AI 配置", mobileLabel: "AI", icon: Bot },
-    {
-      id: "channels",
-      label: "消息渠道",
-      mobileLabel: "渠道",
-      icon: MessageSquare,
-    },
-    { id: "logs", label: "应用日志", mobileLabel: "日志", icon: ScrollText },
-    { id: "settings", label: "设置", mobileLabel: "设置", icon: Settings },
-  ];
+  {
+    id: "dashboard",
+    label: "概览",
+    mobileLabel: "概览",
+    icon: LayoutDashboard,
+  },
+  { id: "agent", label: "智能体", mobileLabel: "Agent", icon: Bot },
+  { id: "ai", label: "AI 配置", mobileLabel: "AI", icon: Sparkles },
+  {
+    id: "channels",
+    label: "消息渠道",
+    mobileLabel: "渠道",
+    icon: MessageSquare,
+  },
+  { id: "logs", label: "应用日志", mobileLabel: "日志", icon: ScrollText },
+  { id: "settings", label: "设置", mobileLabel: "设置", icon: Settings },
+];
 
 export function Sidebar({
   currentPage,
@@ -138,7 +140,7 @@ export function Sidebar({
 
       {/* 移动端固定导航，确保任意页面都可切换 */}
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-dark-600 bg-dark-800/95 backdrop-blur md:hidden">
-        <ul className="grid grid-cols-5 gap-1 px-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2">
+        <ul className="grid grid-cols-6 gap-1 px-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2">
           {menuItems.map((item) => {
             const isActive = currentPage === item.id;
             const Icon = item.icon;
