@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { aiLogger } from "../../lib/logger";
+import { useStagingSession } from "../../contexts/StagingSessionContext";
 
 // ============ 类型定义 ============
 
@@ -135,6 +136,7 @@ function ProviderDialog({
   onSave,
   editingProvider,
 }: ProviderDialogProps) {
+  const { applyChange } = useStagingSession();
   const isEditing = !!editingProvider;
   const [step, setStep] = useState<"select" | "configure">(
     isEditing ? "configure" : "select"
@@ -292,17 +294,21 @@ function ProviderDialog({
         };
       });
 
-      await invoke("save_provider", {
-        providerName,
-        baseUrl,
-        apiKey: apiKey || null,
-        apiType,
-        models,
-      });
-
-      aiLogger.info(
-        `✓ Provider ${providerName} 已${isEditing ? "更新" : "保存"}`
+      await applyChange(
+        "save_provider",
+        {
+          providerName,
+          baseUrl,
+          apiKey: apiKey || null,
+          apiType,
+          models,
+        },
+        isEditing
+          ? `更新 Provider: ${providerName}`
+          : `添加 Provider: ${providerName}`
       );
+
+      aiLogger.info(`Provider ${providerName} 已保存到 Session`);
       onSave();
       onClose();
     } catch (e) {
@@ -766,6 +772,7 @@ function ProviderCard({
   onRefresh,
   onEdit,
 }: ProviderCardProps) {
+  const { applyChange } = useStagingSession();
   const [expanded, setExpanded] = useState(true);
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -791,7 +798,11 @@ function ProviderCard({
     setDeleting(true);
     setDeleteError(null);
     try {
-      await invoke("delete_provider", { providerName: provider.name });
+      await applyChange(
+        "delete_provider",
+        { providerName: provider.name },
+        `删除 Provider: ${provider.name}`
+      );
       setShowDeleteConfirm(false);
       onRefresh();
     } catch (e) {
@@ -1004,6 +1015,8 @@ export function AIConfig() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<AITestResult | null>(null);
 
+  const { applyChange } = useStagingSession();
+
   const handleEditProvider = (provider: ConfiguredProvider) => {
     setEditingProvider(provider);
     setShowAddDialog(true);
@@ -1069,8 +1082,12 @@ export function AIConfig() {
 
   const handleSetPrimary = async (modelId: string) => {
     try {
-      await invoke("set_primary_model", { modelId });
-      aiLogger.info(`主模型已设置为: ${modelId}`);
+      await applyChange(
+        "set_primary_model",
+        { modelId },
+        `设置主模型: ${modelId}`
+      );
+      aiLogger.info(`主模型已设置为: ${modelId} (已写入 Session)`);
       loadData();
     } catch (e) {
       aiLogger.error("设置主模型失败", e);

@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type Dispatch,
   type SetStateAction,
@@ -13,18 +14,14 @@ import {
   Layers,
   MessageSquare,
   Network,
-  RefreshCw,
-  Save,
   Settings2,
   Star,
   Trash2,
   Undo2,
 } from "lucide-react";
 import clsx from "clsx";
+import { useStagingSession } from "../../contexts/StagingSessionContext";
 
-import { createLogger } from "../../lib/logger";
-
-const agentLogger = createLogger("Agent");
 const BINDING_KEY_SEPARATOR = "::";
 
 interface DefaultsQuickLink {
@@ -140,7 +137,6 @@ export interface AgentCenterDataActions {
   setAgents: Dispatch<SetStateAction<VisualAgent[]>>;
   setBaselineAgents: Dispatch<SetStateAction<VisualAgent[]>>;
   reload: (isRefresh?: boolean) => Promise<void>;
-  persistAgents: (nextAgents: VisualAgent[]) => Promise<void>;
 }
 
 interface AgentCenterProps {
@@ -340,6 +336,17 @@ export function parseAgentsList(rawAgents: unknown): VisualAgent[] {
         }
       });
 
+      // 规范化 model 字段：将遗留的 fallbacks（复数）迁移到 fallback（单数）
+      // 避免"用户操作后 diff 显示 [删除] fallbacks / [新增] fallback"的字段名漂移问题
+      if (isRecord(extra.model)) {
+        const model = { ...extra.model };
+        if (model.fallbacks !== undefined && model.fallback === undefined) {
+          model.fallback = model.fallbacks;
+          delete model.fallbacks;
+          extra.model = model;
+        }
+      }
+
       return {
         id: typeof item.id === "string" ? item.id.trim() : "",
         name: typeof item.name === "string" ? item.name.trim() : "",
@@ -404,6 +411,19 @@ export function buildAgentsPayload(
       payload.default = true;
     } else {
       delete payload.default;
+    }
+
+    // 写出时将内存中的 fallback（单数）还原为 fallbacks（复数），
+    // 保持与磁盘配置文件的字段名一致，避免两个问题：
+    // 1. diff 显示"[删除] fallbacks / [新增] fallback"字段名漂移
+    // 2. 未修改的 agent 因字段名变化而出现在 diff 中
+    if (isRecord(payload.model)) {
+      const model = { ...(payload.model as Record<string, unknown>) };
+      if (model.fallback !== undefined) {
+        model.fallbacks = model.fallback;
+        delete model.fallback;
+        payload.model = model;
+      }
     }
 
     return payload;
@@ -991,7 +1011,6 @@ export function AgentCenter({
 }: AgentCenterProps) {
   const {
     loading,
-    refreshing,
     saving,
     error,
     message,
@@ -1004,14 +1023,7 @@ export function AgentCenter({
     modelProviderGroups,
     defaultsRecord,
   } = dataState;
-  const {
-    setError,
-    setMessage,
-    setAgents,
-    setBaselineAgents,
-    reload,
-    persistAgents,
-  } = dataActions;
+  const { setError, setMessage, setAgents } = dataActions;
 
   const [selectedCustomAgentIds, setSelectedCustomAgentIds] = useState<
     Set<string>
@@ -1031,6 +1043,73 @@ export function AgentCenter({
       onDirtyChange?.(false);
     };
   }, [onDirtyChange]);
+
+  // ===== 同步 Agent 变更到 Staging Session =====
+  const { applyChange: stagingApplyChange, active: stagingActive } =
+    useStagingSession();
+
+  const lastPushedSignatureRef = useRef("");
+
+  // 当 agents 相对 baselineAgents 发生变化时，延迟推送到 staging session
+  useEffect(() => {
+    const currentSig = buildAgentsSignature(agents);
+    const baselineSig = buildAgentsSignature(baselineAgents);
+    const isDirty = currentSig !== baselineSig;
+
+    // 已恢复到基线且之前推送过 → 推送基线以撤销 session 中的 Agent 变更
+    if (!isDirty && lastPushedSignatureRef.current) {
+      const timer = setTimeout(() => {
+        const payload = buildAgentsPayload(
+          normalizeVisualAgents(baselineAgents)
+        );
+        void stagingApplyChange(
+          "save_agents_list",
+          { agentsList: payload },
+          "智能体 / 撤销 Agent 变更"
+        )
+          .then(() => {
+            lastPushedSignatureRef.current = "";
+            // 撤销成功后已无变更，通知父组件不再 dirty
+            onDirtyChange?.(false);
+          })
+          .catch((err) => {
+            console.error("撤销 Agent staging 变更失败:", err);
+          });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+
+    // 有变更且签名与上次推送不同 → 推送最新 agents
+    if (isDirty && currentSig !== lastPushedSignatureRef.current) {
+      const timer = setTimeout(() => {
+        const payload = buildAgentsPayload(normalizeVisualAgents(agents));
+        void stagingApplyChange(
+          "save_agents_list",
+          { agentsList: payload },
+          "智能体 / 更新 Agent 配置"
+        )
+          .then(() => {
+            lastPushedSignatureRef.current = currentSig;
+            // 变更已成功写入 Session，全局操作区已可处理，不再阻止导航
+            onDirtyChange?.(false);
+          })
+          .catch((err) => {
+            console.error("推送 Agent 变更到 staging session 失败:", err);
+          });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [agents, baselineAgents, stagingApplyChange, onDirtyChange]);
+
+  // Staging session 被丢弃时，重新加载 Agent 数据以重置本地状态
+  const prevStagingActiveRef = useRef(stagingActive);
+  useEffect(() => {
+    if (prevStagingActiveRef.current && !stagingActive) {
+      lastPushedSignatureRef.current = "";
+      void dataActions.reload();
+    }
+    prevStagingActiveRef.current = stagingActive;
+  }, [stagingActive, dataActions]);
 
   useEffect(() => {
     if (!hasPendingChanges) {
@@ -1716,78 +1795,12 @@ export function AgentCenter({
     setSelectedCustomAgentIds(new Set());
   };
 
-  const handleApplyChanges = async () => {
-    setError(null);
-    setMessage(null);
-
-    try {
-      const normalizedAgents = normalizeVisualAgents(agents);
-      const validationError = validateAgents(normalizedAgents);
-      if (validationError) {
-        setError(validationError);
-        return;
-      }
-
-      // 分区级校验
-      const sectionIssues = validateAgentsSectioned(normalizedAgents);
-      const sectionErrors = sectionIssues.filter(
-        (issue) => issue.level === "error"
-      );
-      const sectionWarnings = sectionIssues.filter(
-        (issue) => issue.level === "warning"
-      );
-
-      if (sectionErrors.length > 0) {
-        setError(
-          `分区校验未通过：\n${sectionErrors
-            .map((issue) => `[${issue.agentId}] ${issue.message}`)
-            .join("；")}`
-        );
-        return;
-      }
-
-      if (sectionWarnings.length > 0) {
-        const warningText = sectionWarnings
-          .map((issue) => `[${issue.agentId}] ${issue.message}`)
-          .join("\n");
-        const confirmed = window.confirm(
-          `以下配置存在潜在风险，是否继续保存？\n\n${warningText}`
-        );
-        if (!confirmed) {
-          return;
-        }
-      }
-
-      await persistAgents(normalizedAgents);
-
-      setAgents(cloneVisualAgents(normalizedAgents));
-      setBaselineAgents(cloneVisualAgents(normalizedAgents));
-      setSelectedCustomAgentIds(new Set());
-    } catch (saveError) {
-      setError(`保存 Agent 变更失败: ${String(saveError)}`);
-      agentLogger.error("保存 Agent 变更失败", saveError);
-    }
-  };
-
   const handleOpenWorkspace = (agentId: string) => {
     onOpenWorkspace?.(agentId);
   };
 
   const handleBackToList = () => {
-    if (!onBackToList) {
-      return;
-    }
-
-    if (hasPendingChanges) {
-      const confirmed = window.confirm(
-        "当前 Agent 详情存在未保存变更，确认返回列表并保留草稿吗？"
-      );
-      if (!confirmed) {
-        return;
-      }
-    }
-
-    onBackToList();
+    onBackToList?.();
   };
 
   const activeAgent =
@@ -1884,1073 +1897,78 @@ export function AgentCenter({
 
   if (viewMode === "workspace") {
     return (
-      <div className="module-page-shell">
-        <div className="mx-auto max-w-5xl space-y-6">
-          <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-xl font-semibold text-white">
-                    Agent 详情
-                  </h2>
-                  {hasPendingChanges && (
-                    <span className="rounded-md bg-amber-500/20 px-2 py-1 text-xs text-amber-300">
-                      有未保存变更
-                    </span>
-                  )}
-                </div>
-                <p className="mt-1 text-sm text-gray-400">
-                  已支持基础信息、模型策略、工具策略与 sandbox 分区编辑，
-                  未识别字段会继续保留在原配置中。
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleBackToList}
-                  className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500"
-                >
-                  <ArrowLeft size={14} />
-                  返回列表
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDiscardChanges}
-                  disabled={!hasPendingChanges || saving}
-                  className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500 disabled:opacity-50"
-                >
-                  <Undo2 size={14} />
-                  撤销
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleApplyChanges()}
-                  disabled={
-                    !hasPendingChanges || saving || loading || refreshing
-                  }
-                  className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-claw-500 px-3 text-sm font-medium text-white transition-colors hover:bg-claw-600 disabled:opacity-50"
-                >
-                  <Save size={14} />
-                  {saving ? "保存中..." : "应用变更"}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {error && (
-            <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">
-              <p>{error}</p>
-            </div>
-          )}
-
-          {message && (
-            <div className="rounded-xl border border-green-500/40 bg-green-500/10 p-4 text-sm text-green-300">
-              <p>{message}</p>
-            </div>
-          )}
-
-          {activeAgent ? (
-            <div className="space-y-4">
-              <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-                <h3 className="text-lg font-semibold text-white">基础信息</h3>
-                <p className="mt-2 text-xs text-gray-400">
-                  当前 Agent：{activeAgent.id}
-                </p>
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">名称（name）</span>
-                    <input
-                      type="text"
-                      value={activeAgent.name}
-                      onChange={(event) =>
-                        handleUpdateAgentField(
-                          activeAgent.id,
-                          "name",
-                          event.target.value
-                        )
-                      }
-                      placeholder="未命名 Agent"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">工作目录（workspace）</span>
-                    <input
-                      type="text"
-                      value={activeAgent.workspace}
-                      onChange={(event) =>
-                        handleUpdateAgentField(
-                          activeAgent.id,
-                          "workspace",
-                          event.target.value
-                        )
-                      }
-                      placeholder="例如 /home/openclaw-manager"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h3 className="text-lg font-semibold text-white">
-                      默认策略入口（agents.defaults.*）
-                    </h3>
-                    <p className="mt-2 text-sm text-gray-400">
-                      Agent 详情页当前不直接写入 defaults，建议通过 Settings
-                      统一编辑。
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => onOpenSettings()}
-                    className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-200 transition-colors hover:bg-dark-600"
-                  >
-                    <Settings2 size={12} />
-                    跳转 Settings
-                  </button>
-                </div>
-
-                {availableDefaultsQuickLinks.length > 0 ? (
-                  <>
-                    <p className="mt-3 text-xs text-gray-400">
-                      已检测到 {availableDefaultsQuickLinks.length} 项常见
-                      defaults 字段（点击可跳转对应设置分区）：
-                    </p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {availableDefaultsQuickLinks.map((item) => (
-                        <button
-                          key={item.key}
-                          type="button"
-                          onClick={() => onOpenSettings(item.settingsTab)}
-                          className="group flex flex-col items-start rounded-md border border-dark-500 bg-dark-600 px-3 py-2 text-left transition-colors hover:border-claw-500/50 hover:bg-dark-500"
-                        >
-                          <span className="text-xs text-gray-200 group-hover:text-claw-300">
-                            {item.label}
-                          </span>
-                          {item.valueSummary && (
-                            <span className="mt-0.5 text-[10px] text-gray-500">
-                              {item.valueSummary(defaultsRecord)}
-                            </span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                    {hiddenDefaultsQuickLinkCount > 0 && (
-                      <p className="mt-2 text-xs text-gray-500">
-                        另有 {hiddenDefaultsQuickLinkCount}{" "}
-                        项默认字段未在快捷入口中展示，请前往 Settings
-                        查看完整配置。
-                      </p>
-                    )}
-                  </>
-                ) : (
-                  <p className="mt-3 text-xs text-gray-500">
-                    当前未检测到常见 defaults 字段，可前往 Settings 检查并补全。
-                  </p>
-                )}
-              </div>
-
-              <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-                <h3 className="text-lg font-semibold text-white">
-                  模型策略（agents.list[i].model）
-                </h3>
-                {defaultsHasModel && isRecord(activeAgent.extra.model) && (
-                  <div className="mt-1.5 flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
-                    <Layers size={10} />
-                    当前 Agent 已覆盖 defaults 中的模型策略（优先级：Agent 覆盖
-                    &gt; defaults &gt; 全局）
-                  </div>
-                )}
-                <p className="mt-2 text-sm text-gray-400">
-                  主模型改为从可用模型中单选，回退模型支持多选（按 provider
-                  分组），temperature / top_p / max_tokens 继续保留数值编辑。
-                </p>
-
-                {flattenedModelOptions.length === 0 ? (
-                  <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-                    未检测到可用模型（agents.defaults.models /
-                    models.providers），请先在 AI 模型配置中补全模型清单。
-                  </div>
-                ) : (
-                  <div className="mt-3 space-y-4">
-                    <label className="flex flex-col gap-1 text-xs text-gray-300">
-                      <span className="text-gray-400">
-                        主模型（primary，单选）
+      <>
+        <div className="module-page-shell">
+          <div className="mx-auto max-w-5xl space-y-6">
+            <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-xl font-semibold text-white">
+                      Agent 详情
+                    </h2>
+                    {hasPendingChanges && (
+                      <span className="rounded-md bg-amber-500/20 px-2 py-1 text-xs text-amber-300">
+                        有未保存变更
                       </span>
-                      <select
-                        value={activeAgentModel.primary}
-                        onChange={(event) =>
-                          handleUpdateAgentModelField(
-                            activeAgent.id,
-                            "primary",
-                            event.target.value
-                          )
-                        }
-                        className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white focus:border-claw-500 focus:outline-none"
-                      >
-                        <option value="">未设置</option>
-                        {modelProviderGroups.map((group) => (
-                          <optgroup key={group.provider} label={group.provider}>
-                            {group.models.map((modelId) => (
-                              <option key={modelId} value={modelId}>
-                                {modelId}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ))}
-                      </select>
-                    </label>
-
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs text-gray-400">
-                          回退模型（fallback，多选）
-                        </span>
-                        <span className="text-[11px] text-gray-500">
-                          已选 {activeAgentModel.fallback.length} 个
-                        </span>
-                      </div>
-
-                      <div className="rounded-lg border border-dark-500 bg-dark-700/40 p-3">
-                        <div className="space-y-3">
-                          {modelProviderGroups.map((group) => (
-                            <div key={group.provider} className="space-y-2">
-                              <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                                {group.provider}
-                              </p>
-                              <div className="flex flex-wrap gap-2">
-                                {group.models.map((modelId) => {
-                                  const checked =
-                                    activeAgentModel.fallback.includes(modelId);
-                                  const nextValues = checked
-                                    ? activeAgentModel.fallback.filter(
-                                        (item) => item !== modelId
-                                      )
-                                    : [...activeAgentModel.fallback, modelId];
-
-                                  return (
-                                    <label
-                                      key={modelId}
-                                      className={clsx(
-                                        "inline-flex min-h-[32px] cursor-pointer items-center gap-2 rounded-md border px-2 py-1 text-xs transition-colors",
-                                        checked
-                                          ? "border-claw-500/50 bg-claw-500/15 text-claw-200"
-                                          : "border-dark-500 bg-dark-700 text-gray-300 hover:bg-dark-600"
-                                      )}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={checked}
-                                        onChange={() =>
-                                          handleUpdateAgentModelField(
-                                            activeAgent.id,
-                                            "fallback",
-                                            formatStringListForInput(nextValues)
-                                          )
-                                        }
-                                        className="h-3.5 w-3.5 rounded border-dark-500 bg-dark-700 text-claw-500"
-                                      />
-                                      <span className="break-all">
-                                        {modelId}
-                                      </span>
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {fallbackModelMissingOptions.length > 0 && (
-                        <p className="text-xs text-amber-300">
-                          当前 fallback 含 {fallbackModelMissingOptions.length}
-                          个未出现在可选列表中的模型：
-                          {fallbackModelMissingOptions.slice(0, 3).join("、")}
-                          {fallbackModelMissingOptions.length > 3 ? " ..." : ""}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">temperature（0~2）</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={2}
-                      step={0.1}
-                      value={activeAgentModel.temperature}
-                      onChange={(event) =>
-                        handleUpdateAgentModelField(
-                          activeAgent.id,
-                          "temperature",
-                          event.target.value
-                        )
-                      }
-                      placeholder="例如 0.7"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">top_p（0~1）</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={activeAgentModel.top_p}
-                      onChange={(event) =>
-                        handleUpdateAgentModelField(
-                          activeAgent.id,
-                          "top_p",
-                          event.target.value
-                        )
-                      }
-                      placeholder="例如 0.9"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="flex flex-col gap-1 text-xs text-gray-300 sm:col-span-2">
-                    <span className="text-gray-400">
-                      max_tokens（整数，&gt;0）
-                    </span>
-                    <input
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={activeAgentModel.max_tokens}
-                      onChange={(event) =>
-                        handleUpdateAgentModelField(
-                          activeAgent.id,
-                          "max_tokens",
-                          event.target.value
-                        )
-                      }
-                      placeholder="例如 4096"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-                </div>
-
-                {activeAgentModel.unknownFieldsCount > 0 && (
-                  <p className="mt-2 text-xs text-gray-500">
-                    已保留 model 其他 {activeAgentModel.unknownFieldsCount}{" "}
-                    个未知字段，不会被覆盖。
-                  </p>
-                )}
-              </div>
-
-              <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-                <h3 className="text-lg font-semibold text-white">
-                  工具策略（agents.list[i].tools）
-                </h3>
-                {defaultsHasTools && isRecord(activeAgent.extra.tools) && (
-                  <div className="mt-1.5 flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
-                    <Layers size={10} />
-                    当前 Agent 已覆盖 defaults 中的工具策略（优先级：Agent 覆盖
-                    &gt; defaults &gt; 全局）
-                  </div>
-                )}
-                <p className="mt-2 text-sm text-gray-400">
-                  支持 allow / deny / elevated 三组清单编辑（换行、逗号、分号
-                  均可分隔），并保留 tools 下其他未知字段。
-                </p>
-
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">allow</span>
-                    <textarea
-                      value={activeAgentTools.allow}
-                      onChange={(event) =>
-                        handleUpdateAgentToolsField(
-                          activeAgent.id,
-                          "allow",
-                          event.target.value
-                        )
-                      }
-                      rows={4}
-                      placeholder={"filesystem-read\nterminal-execute"}
-                      className="rounded-md border border-dark-500 bg-dark-700 px-2 py-2 font-mono text-xs text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">deny</span>
-                    <textarea
-                      value={activeAgentTools.deny}
-                      onChange={(event) =>
-                        handleUpdateAgentToolsField(
-                          activeAgent.id,
-                          "deny",
-                          event.target.value
-                        )
-                      }
-                      rows={4}
-                      placeholder={"shell\nrm -rf"}
-                      className="rounded-md border border-dark-500 bg-dark-700 px-2 py-2 font-mono text-xs text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="flex flex-col gap-1 text-xs text-gray-300 sm:col-span-2">
-                    <span className="text-gray-400">elevated</span>
-                    <textarea
-                      value={activeAgentTools.elevated}
-                      onChange={(event) =>
-                        handleUpdateAgentToolsField(
-                          activeAgent.id,
-                          "elevated",
-                          event.target.value
-                        )
-                      }
-                      rows={3}
-                      placeholder={"terminal-execute"}
-                      className="rounded-md border border-dark-500 bg-dark-700 px-2 py-2 font-mono text-xs text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-                </div>
-
-                <p className="mt-2 text-xs text-gray-500">
-                  校验规则：allow 与 deny 不可同时包含同一工具名。
-                </p>
-                {activeAgentTools.unknownFieldsCount > 0 && (
-                  <p className="mt-1 text-xs text-gray-500">
-                    已保留 tools 其他 {activeAgentTools.unknownFieldsCount}{" "}
-                    个未知字段，不会被覆盖。
-                  </p>
-                )}
-              </div>
-
-              <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-                <h3 className="text-lg font-semibold text-white">
-                  沙箱策略（agents.list[i].sandbox）
-                </h3>
-                {defaultsHasSandbox && isRecord(activeAgent.extra.sandbox) && (
-                  <div className="mt-1.5 flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
-                    <Layers size={10} />
-                    当前 Agent 已覆盖 defaults 中的沙箱策略（优先级：Agent 覆盖
-                    &gt; defaults &gt; 全局）
-                  </div>
-                )}
-                <p className="mt-2 text-sm text-gray-400">
-                  支持 mode / workspaceAccess / scope / workspaceRoot
-                  编辑，并进行基础校验： 当 mode 非 off 时，至少需要 workspace
-                  或 workspaceRoot。
-                </p>
-
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">mode</span>
-                    <input
-                      type="text"
-                      value={activeAgentSandbox.mode}
-                      onChange={(event) =>
-                        handleUpdateAgentSandboxField(
-                          activeAgent.id,
-                          "mode",
-                          event.target.value
-                        )
-                      }
-                      placeholder="off"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">workspaceAccess</span>
-                    <input
-                      type="text"
-                      value={activeAgentSandbox.workspaceAccess}
-                      onChange={(event) =>
-                        handleUpdateAgentSandboxField(
-                          activeAgent.id,
-                          "workspaceAccess",
-                          event.target.value
-                        )
-                      }
-                      placeholder="rw"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">scope</span>
-                    <input
-                      type="text"
-                      value={activeAgentSandbox.scope}
-                      onChange={(event) =>
-                        handleUpdateAgentSandboxField(
-                          activeAgent.id,
-                          "scope",
-                          event.target.value
-                        )
-                      }
-                      placeholder="agent"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-
-                  <label className="flex flex-col gap-1 text-xs text-gray-300">
-                    <span className="text-gray-400">workspaceRoot</span>
-                    <input
-                      type="text"
-                      value={activeAgentSandbox.workspaceRoot}
-                      onChange={(event) =>
-                        handleUpdateAgentSandboxField(
-                          activeAgent.id,
-                          "workspaceRoot",
-                          event.target.value
-                        )
-                      }
-                      placeholder="例如 /home/openclaw/sandboxes-main"
-                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                    />
-                  </label>
-                </div>
-
-                {isSandboxModeRequiringWorkspace(activeAgentSandbox.mode) &&
-                  !activeAgentSandbox.workspaceRoot &&
-                  !activeAgent.workspace.trim() && (
-                    <p className="mt-2 text-xs text-amber-300">
-                      当前 mode 已启用隔离，但 workspace 与 workspaceRoot
-                      均为空； 应用前请至少配置一个路径。
-                    </p>
-                  )}
-
-                {activeAgentSandbox.unknownFieldsCount > 0 && (
-                  <p className="mt-2 text-xs text-gray-500">
-                    已保留 sandbox 其他 {activeAgentSandbox.unknownFieldsCount}{" "}
-                    个未知字段，不会被覆盖。
-                  </p>
-                )}
-              </div>
-
-              <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h3 className="text-lg font-semibold text-white">
-                      路由关系（bindings）
-                    </h3>
-                    <p className="mt-2 text-sm text-gray-400">
-                      当前 Agent 被 {activeAgentBindingReferences.length} 条
-                      bindings 引用。
-                    </p>
-                  </div>
-
-                  {onOpenChannels && (
-                    <button
-                      type="button"
-                      onClick={onOpenChannels}
-                      className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-200 transition-colors hover:bg-dark-600"
-                    >
-                      <MessageSquare size={12} />
-                      跳转 Channels
-                    </button>
-                  )}
-                </div>
-
-                {activeAgentBindingReferences.length > 0 ? (
-                  <ul className="mt-3 space-y-2">
-                    {activeAgentBindingReferences.slice(0, 8).map((entry) => (
-                      <li
-                        key={`${entry.channel}::${entry.accountId}`}
-                        className="flex items-center justify-between gap-3 rounded-md border border-dark-500 bg-dark-700/40 px-3 py-2 text-xs text-gray-300"
-                      >
-                        <span className="truncate">
-                          channel：{entry.channel}
-                        </span>
-                        <span className="truncate text-gray-400">
-                          account：{entry.accountId}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="mt-3 text-xs text-gray-500">
-                    当前 Agent 暂无 channel/account 引用。
-                  </p>
-                )}
-
-                {activeAgentBindingReferences.length > 8 && (
-                  <p className="mt-2 text-xs text-gray-500">
-                    其余 {activeAgentBindingReferences.length - 8} 条引用请前往
-                    Channels 查看。
-                  </p>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-6 text-sm text-amber-300">
-              <p>
-                未找到目标 Agent（{activeAgentId ?? "未指定"}
-                ），请返回列表重新选择。
-              </p>
-              <button
-                type="button"
-                onClick={handleBackToList}
-                className="mt-3 inline-flex min-h-[36px] items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 text-xs text-amber-200 transition-colors hover:bg-amber-500/20"
-              >
-                <ArrowLeft size={12} />
-                返回列表
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="module-page-shell">
-      <div className="mx-auto max-w-5xl space-y-6">
-        <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-xl font-semibold text-white">智能体中心</h2>
-                {hasPendingChanges && (
-                  <span className="rounded-md bg-amber-500/20 px-2 py-1 text-xs text-amber-300">
-                    有未保存变更
-                  </span>
-                )}
-              </div>
-              <p className="mt-1 text-sm text-gray-400">
-                支持设为默认、复制、删除 Agent，并统一应用持久化。
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => void reload(true)}
-                disabled={loading || refreshing || saving}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500"
-              >
-                <RefreshCw
-                  size={14}
-                  className={clsx(refreshing && "animate-spin")}
-                />
-                刷新
-              </button>
-              <button
-                type="button"
-                onClick={handleDiscardChanges}
-                disabled={!hasPendingChanges || saving}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500 disabled:opacity-50"
-              >
-                <Undo2 size={14} />
-                撤销
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleApplyChanges()}
-                disabled={!hasPendingChanges || saving || loading || refreshing}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-claw-500 px-3 text-sm font-medium text-white transition-colors hover:bg-claw-600 disabled:opacity-50"
-              >
-                <Save size={14} />
-                {saving ? "保存中..." : "应用变更"}
-              </button>
-              <button
-                type="button"
-                onClick={() => onOpenSettings()}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500"
-              >
-                <Settings2 size={14} />
-                前往设置编辑
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {warnings.length > 0 && (
-          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-300">
-            <p className="mb-2 font-medium">部分数据已降级加载：</p>
-            <ul className="list-disc space-y-1 pl-5">
-              {warnings.map((warning) => (
-                <li key={warning}>{warning}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {error && (
-          <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">
-            <p>{error}</p>
-          </div>
-        )}
-
-        {message && (
-          <div className="rounded-xl border border-green-500/40 bg-green-500/10 p-4 text-sm text-green-300">
-            <p>{message}</p>
-          </div>
-        )}
-
-        {hasPendingChanges && (
-          <div className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 p-4 text-sm text-cyan-200">
-            <p className="mb-2 font-medium">变更摘要（相对已保存基线）</p>
-            <ul className="list-disc space-y-1 pl-5">
-              {changeSummary.addedIds.length > 0 && (
-                <li>新增 Agent：{changeSummary.addedIds.join("、")}</li>
-              )}
-              {changeSummary.removedIds.length > 0 && (
-                <li>删除 Agent：{changeSummary.removedIds.join("、")}</li>
-              )}
-              {changeSummary.defaultSwitched && (
-                <li>
-                  默认 Agent：{changeSummary.defaultSwitched.from ?? "未设置"} →{" "}
-                  {changeSummary.defaultSwitched.to ?? "未设置"}
-                </li>
-              )}
-              {changeSummary.updatedAgents.length > 0 && (
-                <li>
-                  字段更新：
-                  <ul className="mt-1 list-disc space-y-1 pl-5">
-                    {changeSummary.updatedAgents.slice(0, 5).map((item) => (
-                      <li key={item.agentId}>
-                        <span className="font-medium">{item.agentId}</span>：
-                        {item.changedFields.join("；")}
-                      </li>
-                    ))}
-                    {changeSummary.updatedAgents.length > 5 && (
-                      <li>
-                        其余 {changeSummary.updatedAgents.length - 5} 个 Agent
-                        仍有字段更新...
-                      </li>
                     )}
-                  </ul>
-                </li>
-              )}
-              {changeSummary.addedIds.length === 0 &&
-                changeSummary.removedIds.length === 0 &&
-                !changeSummary.defaultSwitched &&
-                changeSummary.updatedAgents.length === 0 && (
-                  <li>当前草稿未检测到可摘要的结构化变更。</li>
-                )}
-            </ul>
-
-            {sectionIssuesPreview.length > 0 && (
-              <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-                <p className="mb-1.5 text-xs font-medium text-amber-300">
-                  <AlertTriangle size={12} className="mr-1 inline-block" />
-                  分区预检（
-                  {
-                    sectionIssuesPreview.filter((i) => i.level === "error")
-                      .length
-                  }{" "}
-                  项阻断 /{" "}
-                  {
-                    sectionIssuesPreview.filter((i) => i.level === "warning")
-                      .length
-                  }{" "}
-                  项警告）
-                </p>
-                <ul className="list-disc space-y-0.5 pl-5 text-xs">
-                  {sectionIssuesPreview.map((issue, idx) => (
-                    <li
-                      key={`${issue.agentId}-${issue.section}-${idx}`}
-                      className={
-                        issue.level === "error"
-                          ? "text-red-300"
-                          : "text-amber-200"
-                      }
-                    >
-                      [{issue.agentId}] {issue.message}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <div className="rounded-xl border border-dark-500 bg-dark-700/70 p-4">
-            <div className="mb-3 flex items-center gap-2 text-sm font-medium text-white">
-              <Network size={16} className="text-cyan-400" />
-              全局（Gateway）
-            </div>
-            <p className="text-xs text-gray-400">port：{gatewaySummary.port}</p>
-            <p className="text-xs text-gray-400">bind：{gatewaySummary.bind}</p>
-            <p className="text-xs text-gray-400">
-              reload：{gatewaySummary.reloadMode} · trustedProxies：
-              {gatewaySummary.trustedProxies}
-            </p>
-          </div>
-
-          <div className="rounded-xl border border-dark-500 bg-dark-700/70 p-4">
-            <div className="mb-3 flex items-center gap-2 text-sm font-medium text-white">
-              <Layers size={16} className="text-purple-400" />
-              默认（agents.defaults）
-            </div>
-            {defaultScopeKeys.length > 0 ? (
-              <>
-                <p className="text-xs text-gray-400">
-                  作用域字段：{defaultScopeKeys.length} 项
-                </p>
-                <p className="mt-1 text-xs text-gray-500">
-                  {visibleDefaultScopeKeys.join(" · ")}
-                  {hiddenDefaultScopeCount > 0
-                    ? ` · +${hiddenDefaultScopeCount} 项`
-                    : ""}
-                </p>
-                <p className="mt-2 text-xs text-gray-500">
-                  defaults 写入入口已统一到 Settings，Agent
-                  模块仅提供可读摘要与跳转入口。
-                </p>
-              </>
-            ) : (
-              <p className="text-xs text-gray-500">
-                尚未检测到 defaults 配置，将继承系统默认行为。
-              </p>
-            )}
-          </div>
-
-          <div className="rounded-xl border border-dark-500 bg-dark-700/70 p-4">
-            <div className="mb-3 flex items-center gap-2 text-sm font-medium text-white">
-              <AlertTriangle size={16} className="text-amber-400" />单 Agent
-              覆盖（agents.list[i]）
-            </div>
-            <p className="text-xs text-gray-400">
-              总 Agent：{agents.length} 个
-            </p>
-            <p className="text-xs text-gray-400">
-              自定义 Agent：{customAgents.length} 个
-            </p>
-            <p className="text-xs text-gray-400">
-              含覆盖字段：{overrideAgentsCount} 个
-            </p>
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <h3 className="text-lg font-semibold text-white">Default Agent</h3>
-            <span className="rounded-md bg-dark-600 px-2 py-1 text-xs text-gray-400">
-              {Object.keys(bindingsMap).length} 条 bindings
-            </span>
-          </div>
-
-          {loading ? (
-            <p className="text-sm text-gray-500">正在加载 Agent 数据...</p>
-          ) : defaultAgent ? (
-            <div className="rounded-xl border border-claw-500/40 bg-claw-500/10 p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="flex items-center gap-2 text-sm font-semibold text-white">
-                    <Bot size={16} className="text-claw-400" />
-                    <span className="break-all">{defaultAgent.id}</span>
-                  </p>
-                  <p className="mt-1 text-xs text-gray-400">
-                    ID 固定，name/workspace 可编辑
+                  </div>
+                  <p className="mt-1 text-sm text-gray-400">
+                    已支持基础信息、模型策略、工具策略与 sandbox 分区编辑，
+                    未识别字段会继续保留在原配置中。
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  {onOpenWorkspace && (
-                    <button
-                      type="button"
-                      onClick={() => handleOpenWorkspace(defaultAgent.id)}
-                      className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
-                    >
-                      <Settings2 size={12} />
-                      详情配置
-                    </button>
-                  )}
+
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => handleDuplicateAgent(defaultAgent.id)}
-                    className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
+                    onClick={handleBackToList}
+                    className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500"
                   >
-                    <Copy size={12} />
-                    复制 Agent
+                    <ArrowLeft size={14} />
+                    返回列表
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDiscardChanges}
+                    disabled={!hasPendingChanges || saving}
+                    className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500 disabled:opacity-50"
+                  >
+                    <Undo2 size={14} />
+                    撤销
                   </button>
                 </div>
               </div>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <label className="flex flex-col gap-1 text-xs text-gray-300">
-                  <span className="text-gray-400">名称（name）</span>
-                  <input
-                    type="text"
-                    value={defaultAgent.name}
-                    onChange={(event) =>
-                      handleUpdateAgentField(
-                        defaultAgent.id,
-                        "name",
-                        event.target.value
-                      )
-                    }
-                    placeholder="未命名 Agent"
-                    className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-xs text-gray-300">
-                  <span className="text-gray-400">工作目录（workspace）</span>
-                  <input
-                    type="text"
-                    value={defaultAgent.workspace}
-                    onChange={(event) =>
-                      handleUpdateAgentField(
-                        defaultAgent.id,
-                        "workspace",
-                        event.target.value
-                      )
-                    }
-                    placeholder="例如 /home/openclaw-manager"
-                    className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
-                  />
-                </label>
-                <p className="text-xs text-gray-300">
-                  绑定账号数：{bindingCountByAgent[defaultAgent.id] ?? 0}
-                </p>
-                <p className="text-xs text-gray-300">
-                  覆盖字段：{Object.keys(defaultAgent.extra).length}
-                </p>
+            </div>
+
+            {error && (
+              <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">
+                <p>{error}</p>
               </div>
-            </div>
-          ) : (
-            <p className="text-sm text-gray-500">
-              当前未检测到可用 Agent，请先在设置页创建。
-            </p>
-          )}
-        </div>
+            )}
 
-        <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <h3 className="text-lg font-semibold text-white">
-              自定义 Agent 列表
-            </h3>
-            <span className="rounded-md bg-dark-600 px-2 py-1 text-xs text-gray-400">
-              {customAgents.length} 项
-            </span>
-          </div>
+            {message && (
+              <div className="rounded-xl border border-green-500/40 bg-green-500/10 p-4 text-sm text-green-300">
+                <p>{message}</p>
+              </div>
+            )}
 
-          {!loading && customAgents.length > 0 && (
-            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-dark-500 bg-dark-700/40 p-3">
-              <label className="inline-flex items-center gap-2 text-xs text-gray-300">
-                <input
-                  type="checkbox"
-                  checked={allCustomSelected}
-                  onChange={(event) =>
-                    handleSelectAllCustomAgents(event.target.checked)
-                  }
-                  className="h-4 w-4 rounded border-dark-500 bg-dark-700 text-claw-500 focus:ring-claw-500"
-                />
-                全选
-              </label>
-              <span className="text-xs text-gray-400">
-                已选 {selectedCustomAgentsCount} 项
-              </span>
-              <button
-                type="button"
-                onClick={handleBatchDuplicateSelected}
-                disabled={selectedCustomAgentsCount === 0 || saving}
-                className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-200 transition-colors hover:bg-dark-600 disabled:opacity-50"
-              >
-                <Copy size={12} />
-                批量复制选中
-              </button>
-              <button
-                type="button"
-                onClick={handleBatchDeleteSelected}
-                disabled={selectedCustomAgentsCount === 0 || saving}
-                className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-red-500/30 bg-red-500/10 px-2 text-xs text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50"
-              >
-                <Trash2 size={12} />
-                批量删除选中
-              </button>
-            </div>
-          )}
-
-          {!loading && customAgents.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-dark-500 bg-dark-700/40 p-6 text-center text-sm text-gray-500">
-              暂无自定义 Agent，可前往设置页新增。
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {customAgents.map((agent) => (
-                <div
-                  key={agent.id}
-                  className="rounded-xl border border-dark-500 bg-dark-700/50 p-4"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex min-w-0 items-start gap-2">
-                      <input
-                        type="checkbox"
-                        checked={selectedCustomAgentIds.has(agent.id)}
-                        onChange={(event) =>
-                          toggleSelectCustomAgent(
-                            agent.id,
-                            event.target.checked
-                          )
-                        }
-                        disabled={saving}
-                        className="mt-1 h-4 w-4 rounded border-dark-500 bg-dark-700 text-claw-500 focus:ring-claw-500"
-                      />
-                      <div className="min-w-0">
-                        <p className="break-all text-sm font-medium text-white">
-                          {agent.id}
-                        </p>
-                        <p className="mt-1 text-xs text-gray-400">
-                          ID 固定，name/workspace 可编辑
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      {onOpenWorkspace && (
-                        <button
-                          type="button"
-                          onClick={() => handleOpenWorkspace(agent.id)}
-                          className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
-                        >
-                          <Settings2 size={12} />
-                          详情配置
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => handleSetDefault(agent.id)}
-                        className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
-                      >
-                        <Star size={12} />
-                        设为默认
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDuplicateAgent(agent.id)}
-                        className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
-                      >
-                        <Copy size={12} />
-                        复制 Agent
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteAgent(agent.id)}
-                        className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-red-500/30 bg-red-500/10 px-2 text-xs text-red-300 transition-colors hover:bg-red-500/20"
-                      >
-                        <Trash2 size={12} />
-                        删除
-                      </button>
-                    </div>
-                  </div>
-
+            {activeAgent ? (
+              <div className="space-y-4">
+                <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+                  <h3 className="text-lg font-semibold text-white">基础信息</h3>
+                  <p className="mt-2 text-xs text-gray-400">
+                    当前 Agent：{activeAgent.id}
+                  </p>
                   <div className="mt-3 grid gap-3 sm:grid-cols-2">
                     <label className="flex flex-col gap-1 text-xs text-gray-300">
                       <span className="text-gray-400">名称（name）</span>
                       <input
                         type="text"
-                        value={agent.name}
+                        value={activeAgent.name}
                         onChange={(event) =>
                           handleUpdateAgentField(
-                            agent.id,
+                            activeAgent.id,
                             "name",
                             event.target.value
                           )
@@ -2965,10 +1983,10 @@ export function AgentCenter({
                       </span>
                       <input
                         type="text"
-                        value={agent.workspace}
+                        value={activeAgent.workspace}
                         onChange={(event) =>
                           handleUpdateAgentField(
-                            agent.id,
+                            activeAgent.id,
                             "workspace",
                             event.target.value
                           )
@@ -2977,19 +1995,1009 @@ export function AgentCenter({
                         className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
                       />
                     </label>
-                    <p className="text-xs text-gray-300">
-                      绑定账号数：{bindingCountByAgent[agent.id] ?? 0}
-                    </p>
-                    <p className="text-xs text-gray-300">
-                      覆盖字段：{Object.keys(agent.extra).length}
-                    </p>
                   </div>
                 </div>
-              ))}
+
+                <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-white">
+                        默认策略入口（agents.defaults.*）
+                      </h3>
+                      <p className="mt-2 text-sm text-gray-400">
+                        Agent 详情页当前不直接写入 defaults，建议通过 Settings
+                        统一编辑。
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => onOpenSettings()}
+                      className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-200 transition-colors hover:bg-dark-600"
+                    >
+                      <Settings2 size={12} />
+                      跳转 Settings
+                    </button>
+                  </div>
+
+                  {availableDefaultsQuickLinks.length > 0 ? (
+                    <>
+                      <p className="mt-3 text-xs text-gray-400">
+                        已检测到 {availableDefaultsQuickLinks.length} 项常见
+                        defaults 字段（点击可跳转对应设置分区）：
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {availableDefaultsQuickLinks.map((item) => (
+                          <button
+                            key={item.key}
+                            type="button"
+                            onClick={() => onOpenSettings(item.settingsTab)}
+                            className="group flex flex-col items-start rounded-md border border-dark-500 bg-dark-600 px-3 py-2 text-left transition-colors hover:border-claw-500/50 hover:bg-dark-500"
+                          >
+                            <span className="text-xs text-gray-200 group-hover:text-claw-300">
+                              {item.label}
+                            </span>
+                            {item.valueSummary && (
+                              <span className="mt-0.5 text-[10px] text-gray-500">
+                                {item.valueSummary(defaultsRecord)}
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                      {hiddenDefaultsQuickLinkCount > 0 && (
+                        <p className="mt-2 text-xs text-gray-500">
+                          另有 {hiddenDefaultsQuickLinkCount}{" "}
+                          项默认字段未在快捷入口中展示，请前往 Settings
+                          查看完整配置。
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="mt-3 text-xs text-gray-500">
+                      当前未检测到常见 defaults 字段，可前往 Settings
+                      检查并补全。
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+                  <h3 className="text-lg font-semibold text-white">
+                    模型策略（agents.list[i].model）
+                  </h3>
+                  {defaultsHasModel && isRecord(activeAgent.extra.model) && (
+                    <div className="mt-1.5 flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
+                      <Layers size={10} />
+                      当前 Agent 已覆盖 defaults 中的模型策略（优先级：Agent
+                      覆盖 &gt; defaults &gt; 全局）
+                    </div>
+                  )}
+                  <p className="mt-2 text-sm text-gray-400">
+                    主模型改为从可用模型中单选，回退模型支持多选（按 provider
+                    分组），temperature / top_p / max_tokens 继续保留数值编辑。
+                  </p>
+
+                  {flattenedModelOptions.length === 0 ? (
+                    <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                      未检测到可用模型（agents.defaults.models /
+                      models.providers），请先在 AI 模型配置中补全模型清单。
+                    </div>
+                  ) : (
+                    <div className="mt-3 space-y-4">
+                      <label className="flex flex-col gap-1 text-xs text-gray-300">
+                        <span className="text-gray-400">
+                          主模型（primary，单选）
+                        </span>
+                        <select
+                          value={activeAgentModel.primary}
+                          onChange={(event) =>
+                            handleUpdateAgentModelField(
+                              activeAgent.id,
+                              "primary",
+                              event.target.value
+                            )
+                          }
+                          className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white focus:border-claw-500 focus:outline-none"
+                        >
+                          <option value="">未设置</option>
+                          {modelProviderGroups.map((group) => (
+                            <optgroup
+                              key={group.provider}
+                              label={group.provider}
+                            >
+                              {group.models.map((modelId) => (
+                                <option key={modelId} value={modelId}>
+                                  {modelId}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                      </label>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs text-gray-400">
+                            回退模型（fallback，多选）
+                          </span>
+                          <span className="text-[11px] text-gray-500">
+                            已选 {activeAgentModel.fallback.length} 个
+                          </span>
+                        </div>
+
+                        <div className="rounded-lg border border-dark-500 bg-dark-700/40 p-3">
+                          <div className="space-y-3">
+                            {modelProviderGroups.map((group) => (
+                              <div key={group.provider} className="space-y-2">
+                                <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                                  {group.provider}
+                                </p>
+                                <div className="flex flex-wrap gap-2">
+                                  {group.models.map((modelId) => {
+                                    const checked =
+                                      activeAgentModel.fallback.includes(
+                                        modelId
+                                      );
+                                    const nextValues = checked
+                                      ? activeAgentModel.fallback.filter(
+                                          (item) => item !== modelId
+                                        )
+                                      : [...activeAgentModel.fallback, modelId];
+
+                                    return (
+                                      <label
+                                        key={modelId}
+                                        className={clsx(
+                                          "inline-flex min-h-[32px] cursor-pointer items-center gap-2 rounded-md border px-2 py-1 text-xs transition-colors",
+                                          checked
+                                            ? "border-claw-500/50 bg-claw-500/15 text-claw-200"
+                                            : "border-dark-500 bg-dark-700 text-gray-300 hover:bg-dark-600"
+                                        )}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          onChange={() =>
+                                            handleUpdateAgentModelField(
+                                              activeAgent.id,
+                                              "fallback",
+                                              formatStringListForInput(
+                                                nextValues
+                                              )
+                                            )
+                                          }
+                                          className="h-3.5 w-3.5 rounded border-dark-500 bg-dark-700 text-claw-500"
+                                        />
+                                        <span className="break-all">
+                                          {modelId}
+                                        </span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {fallbackModelMissingOptions.length > 0 && (
+                          <p className="text-xs text-amber-300">
+                            当前 fallback 含{" "}
+                            {fallbackModelMissingOptions.length}
+                            个未出现在可选列表中的模型：
+                            {fallbackModelMissingOptions.slice(0, 3).join("、")}
+                            {fallbackModelMissingOptions.length > 3
+                              ? " ..."
+                              : ""}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <label className="flex flex-col gap-1 text-xs text-gray-300">
+                      <span className="text-gray-400">temperature（0~2）</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={2}
+                        step={0.1}
+                        value={activeAgentModel.temperature}
+                        onChange={(event) =>
+                          handleUpdateAgentModelField(
+                            activeAgent.id,
+                            "temperature",
+                            event.target.value
+                          )
+                        }
+                        placeholder="例如 0.7"
+                        className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-xs text-gray-300">
+                      <span className="text-gray-400">top_p（0~1）</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={activeAgentModel.top_p}
+                        onChange={(event) =>
+                          handleUpdateAgentModelField(
+                            activeAgent.id,
+                            "top_p",
+                            event.target.value
+                          )
+                        }
+                        placeholder="例如 0.9"
+                        className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-xs text-gray-300 sm:col-span-2">
+                      <span className="text-gray-400">
+                        max_tokens（整数，&gt;0）
+                      </span>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={activeAgentModel.max_tokens}
+                        onChange={(event) =>
+                          handleUpdateAgentModelField(
+                            activeAgent.id,
+                            "max_tokens",
+                            event.target.value
+                          )
+                        }
+                        placeholder="例如 4096"
+                        className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+
+                  {activeAgentModel.unknownFieldsCount > 0 && (
+                    <p className="mt-2 text-xs text-gray-500">
+                      已保留 model 其他 {activeAgentModel.unknownFieldsCount}{" "}
+                      个未知字段，不会被覆盖。
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+                  <h3 className="text-lg font-semibold text-white">
+                    工具策略（agents.list[i].tools）
+                  </h3>
+                  {defaultsHasTools && isRecord(activeAgent.extra.tools) && (
+                    <div className="mt-1.5 flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
+                      <Layers size={10} />
+                      当前 Agent 已覆盖 defaults 中的工具策略（优先级：Agent
+                      覆盖 &gt; defaults &gt; 全局）
+                    </div>
+                  )}
+                  <p className="mt-2 text-sm text-gray-400">
+                    支持 allow / deny / elevated 三组清单编辑（换行、逗号、分号
+                    均可分隔），并保留 tools 下其他未知字段。
+                  </p>
+
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <label className="flex flex-col gap-1 text-xs text-gray-300">
+                      <span className="text-gray-400">allow</span>
+                      <textarea
+                        value={activeAgentTools.allow}
+                        onChange={(event) =>
+                          handleUpdateAgentToolsField(
+                            activeAgent.id,
+                            "allow",
+                            event.target.value
+                          )
+                        }
+                        rows={4}
+                        placeholder={"filesystem-read\nterminal-execute"}
+                        className="rounded-md border border-dark-500 bg-dark-700 px-2 py-2 font-mono text-xs text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-xs text-gray-300">
+                      <span className="text-gray-400">deny</span>
+                      <textarea
+                        value={activeAgentTools.deny}
+                        onChange={(event) =>
+                          handleUpdateAgentToolsField(
+                            activeAgent.id,
+                            "deny",
+                            event.target.value
+                          )
+                        }
+                        rows={4}
+                        placeholder={"shell\nrm -rf"}
+                        className="rounded-md border border-dark-500 bg-dark-700 px-2 py-2 font-mono text-xs text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-xs text-gray-300 sm:col-span-2">
+                      <span className="text-gray-400">elevated</span>
+                      <textarea
+                        value={activeAgentTools.elevated}
+                        onChange={(event) =>
+                          handleUpdateAgentToolsField(
+                            activeAgent.id,
+                            "elevated",
+                            event.target.value
+                          )
+                        }
+                        rows={3}
+                        placeholder={"terminal-execute"}
+                        className="rounded-md border border-dark-500 bg-dark-700 px-2 py-2 font-mono text-xs text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+
+                  <p className="mt-2 text-xs text-gray-500">
+                    校验规则：allow 与 deny 不可同时包含同一工具名。
+                  </p>
+                  {activeAgentTools.unknownFieldsCount > 0 && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      已保留 tools 其他 {activeAgentTools.unknownFieldsCount}{" "}
+                      个未知字段，不会被覆盖。
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+                  <h3 className="text-lg font-semibold text-white">
+                    沙箱策略（agents.list[i].sandbox）
+                  </h3>
+                  {defaultsHasSandbox &&
+                    isRecord(activeAgent.extra.sandbox) && (
+                      <div className="mt-1.5 flex items-center gap-1 rounded bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
+                        <Layers size={10} />
+                        当前 Agent 已覆盖 defaults 中的沙箱策略（优先级：Agent
+                        覆盖 &gt; defaults &gt; 全局）
+                      </div>
+                    )}
+                  <p className="mt-2 text-sm text-gray-400">
+                    支持 mode / workspaceAccess / scope / workspaceRoot
+                    编辑，并进行基础校验： 当 mode 非 off 时，至少需要 workspace
+                    或 workspaceRoot。
+                  </p>
+
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <label className="flex flex-col gap-1 text-xs text-gray-300">
+                      <span className="text-gray-400">mode</span>
+                      <input
+                        type="text"
+                        value={activeAgentSandbox.mode}
+                        onChange={(event) =>
+                          handleUpdateAgentSandboxField(
+                            activeAgent.id,
+                            "mode",
+                            event.target.value
+                          )
+                        }
+                        placeholder="off"
+                        className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-xs text-gray-300">
+                      <span className="text-gray-400">workspaceAccess</span>
+                      <input
+                        type="text"
+                        value={activeAgentSandbox.workspaceAccess}
+                        onChange={(event) =>
+                          handleUpdateAgentSandboxField(
+                            activeAgent.id,
+                            "workspaceAccess",
+                            event.target.value
+                          )
+                        }
+                        placeholder="rw"
+                        className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-xs text-gray-300">
+                      <span className="text-gray-400">scope</span>
+                      <input
+                        type="text"
+                        value={activeAgentSandbox.scope}
+                        onChange={(event) =>
+                          handleUpdateAgentSandboxField(
+                            activeAgent.id,
+                            "scope",
+                            event.target.value
+                          )
+                        }
+                        placeholder="agent"
+                        className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-xs text-gray-300">
+                      <span className="text-gray-400">workspaceRoot</span>
+                      <input
+                        type="text"
+                        value={activeAgentSandbox.workspaceRoot}
+                        onChange={(event) =>
+                          handleUpdateAgentSandboxField(
+                            activeAgent.id,
+                            "workspaceRoot",
+                            event.target.value
+                          )
+                        }
+                        placeholder="例如 /home/openclaw/sandboxes-main"
+                        className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+
+                  {isSandboxModeRequiringWorkspace(activeAgentSandbox.mode) &&
+                    !activeAgentSandbox.workspaceRoot &&
+                    !activeAgent.workspace.trim() && (
+                      <p className="mt-2 text-xs text-amber-300">
+                        当前 mode 已启用隔离，但 workspace 与 workspaceRoot
+                        均为空； 应用前请至少配置一个路径。
+                      </p>
+                    )}
+
+                  {activeAgentSandbox.unknownFieldsCount > 0 && (
+                    <p className="mt-2 text-xs text-gray-500">
+                      已保留 sandbox 其他{" "}
+                      {activeAgentSandbox.unknownFieldsCount}{" "}
+                      个未知字段，不会被覆盖。
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-white">
+                        路由关系（bindings）
+                      </h3>
+                      <p className="mt-2 text-sm text-gray-400">
+                        当前 Agent 被 {activeAgentBindingReferences.length} 条
+                        bindings 引用。
+                      </p>
+                    </div>
+
+                    {onOpenChannels && (
+                      <button
+                        type="button"
+                        onClick={onOpenChannels}
+                        className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-200 transition-colors hover:bg-dark-600"
+                      >
+                        <MessageSquare size={12} />
+                        跳转 Channels
+                      </button>
+                    )}
+                  </div>
+
+                  {activeAgentBindingReferences.length > 0 ? (
+                    <ul className="mt-3 space-y-2">
+                      {activeAgentBindingReferences.slice(0, 8).map((entry) => (
+                        <li
+                          key={`${entry.channel}::${entry.accountId}`}
+                          className="flex items-center justify-between gap-3 rounded-md border border-dark-500 bg-dark-700/40 px-3 py-2 text-xs text-gray-300"
+                        >
+                          <span className="truncate">
+                            channel：{entry.channel}
+                          </span>
+                          <span className="truncate text-gray-400">
+                            account：{entry.accountId}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-3 text-xs text-gray-500">
+                      当前 Agent 暂无 channel/account 引用。
+                    </p>
+                  )}
+
+                  {activeAgentBindingReferences.length > 8 && (
+                    <p className="mt-2 text-xs text-gray-500">
+                      其余 {activeAgentBindingReferences.length - 8}{" "}
+                      条引用请前往 Channels 查看。
+                    </p>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-6 text-sm text-amber-300">
+                <p>
+                  未找到目标 Agent（{activeAgentId ?? "未指定"}
+                  ），请返回列表重新选择。
+                </p>
+                <button
+                  type="button"
+                  onClick={handleBackToList}
+                  className="mt-3 inline-flex min-h-[36px] items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 text-xs text-amber-200 transition-colors hover:bg-amber-500/20"
+                >
+                  <ArrowLeft size={12} />
+                  返回列表
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="module-page-shell">
+        <div className="mx-auto max-w-5xl space-y-6">
+          <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-xl font-semibold text-white">
+                    智能体中心
+                  </h2>
+                  {hasPendingChanges && (
+                    <span className="rounded-md bg-amber-500/20 px-2 py-1 text-xs text-amber-300">
+                      有未保存变更
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-sm text-gray-400">
+                  支持设为默认、复制、删除 Agent，并统一应用持久化。
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleDiscardChanges}
+                  disabled={!hasPendingChanges || saving}
+                  className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500 disabled:opacity-50"
+                >
+                  <Undo2 size={14} />
+                  撤销
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenSettings()}
+                  className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-dark-500 bg-dark-600 px-3 text-sm text-gray-200 transition-colors hover:bg-dark-500"
+                >
+                  <Settings2 size={14} />
+                  前往设置编辑
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {warnings.length > 0 && (
+            <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-300">
+              <p className="mb-2 font-medium">部分数据已降级加载：</p>
+              <ul className="list-disc space-y-1 pl-5">
+                {warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
             </div>
           )}
+
+          {error && (
+            <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">
+              <p>{error}</p>
+            </div>
+          )}
+
+          {message && (
+            <div className="rounded-xl border border-green-500/40 bg-green-500/10 p-4 text-sm text-green-300">
+              <p>{message}</p>
+            </div>
+          )}
+
+          {hasPendingChanges && (
+            <div className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 p-4 text-sm text-cyan-200">
+              <p className="mb-2 font-medium">变更摘要（相对已保存基线）</p>
+              <ul className="list-disc space-y-1 pl-5">
+                {changeSummary.addedIds.length > 0 && (
+                  <li>新增 Agent：{changeSummary.addedIds.join("、")}</li>
+                )}
+                {changeSummary.removedIds.length > 0 && (
+                  <li>删除 Agent：{changeSummary.removedIds.join("、")}</li>
+                )}
+                {changeSummary.defaultSwitched && (
+                  <li>
+                    默认 Agent：{changeSummary.defaultSwitched.from ?? "未设置"}{" "}
+                    → {changeSummary.defaultSwitched.to ?? "未设置"}
+                  </li>
+                )}
+                {changeSummary.updatedAgents.length > 0 && (
+                  <li>
+                    字段更新：
+                    <ul className="mt-1 list-disc space-y-1 pl-5">
+                      {changeSummary.updatedAgents.slice(0, 5).map((item) => (
+                        <li key={item.agentId}>
+                          <span className="font-medium">{item.agentId}</span>：
+                          {item.changedFields.join("；")}
+                        </li>
+                      ))}
+                      {changeSummary.updatedAgents.length > 5 && (
+                        <li>
+                          其余 {changeSummary.updatedAgents.length - 5} 个 Agent
+                          仍有字段更新...
+                        </li>
+                      )}
+                    </ul>
+                  </li>
+                )}
+                {changeSummary.addedIds.length === 0 &&
+                  changeSummary.removedIds.length === 0 &&
+                  !changeSummary.defaultSwitched &&
+                  changeSummary.updatedAgents.length === 0 && (
+                    <li>当前草稿未检测到可摘要的结构化变更。</li>
+                  )}
+              </ul>
+
+              {sectionIssuesPreview.length > 0 && (
+                <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                  <p className="mb-1.5 text-xs font-medium text-amber-300">
+                    <AlertTriangle size={12} className="mr-1 inline-block" />
+                    分区预检（
+                    {
+                      sectionIssuesPreview.filter((i) => i.level === "error")
+                        .length
+                    }{" "}
+                    项阻断 /{" "}
+                    {
+                      sectionIssuesPreview.filter((i) => i.level === "warning")
+                        .length
+                    }{" "}
+                    项警告）
+                  </p>
+                  <ul className="list-disc space-y-0.5 pl-5 text-xs">
+                    {sectionIssuesPreview.map((issue, idx) => (
+                      <li
+                        key={`${issue.agentId}-${issue.section}-${idx}`}
+                        className={
+                          issue.level === "error"
+                            ? "text-red-300"
+                            : "text-amber-200"
+                        }
+                      >
+                        [{issue.agentId}] {issue.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="rounded-xl border border-dark-500 bg-dark-700/70 p-4">
+              <div className="mb-3 flex items-center gap-2 text-sm font-medium text-white">
+                <Network size={16} className="text-cyan-400" />
+                全局（Gateway）
+              </div>
+              <p className="text-xs text-gray-400">
+                port：{gatewaySummary.port}
+              </p>
+              <p className="text-xs text-gray-400">
+                bind：{gatewaySummary.bind}
+              </p>
+              <p className="text-xs text-gray-400">
+                reload：{gatewaySummary.reloadMode} · trustedProxies：
+                {gatewaySummary.trustedProxies}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-dark-500 bg-dark-700/70 p-4">
+              <div className="mb-3 flex items-center gap-2 text-sm font-medium text-white">
+                <Layers size={16} className="text-purple-400" />
+                默认（agents.defaults）
+              </div>
+              {defaultScopeKeys.length > 0 ? (
+                <>
+                  <p className="text-xs text-gray-400">
+                    作用域字段：{defaultScopeKeys.length} 项
+                  </p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {visibleDefaultScopeKeys.join(" · ")}
+                    {hiddenDefaultScopeCount > 0
+                      ? ` · +${hiddenDefaultScopeCount} 项`
+                      : ""}
+                  </p>
+                  <p className="mt-2 text-xs text-gray-500">
+                    defaults 写入入口已统一到 Settings，Agent
+                    模块仅提供可读摘要与跳转入口。
+                  </p>
+                </>
+              ) : (
+                <p className="text-xs text-gray-500">
+                  尚未检测到 defaults 配置，将继承系统默认行为。
+                </p>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-dark-500 bg-dark-700/70 p-4">
+              <div className="mb-3 flex items-center gap-2 text-sm font-medium text-white">
+                <AlertTriangle size={16} className="text-amber-400" />单 Agent
+                覆盖（agents.list[i]）
+              </div>
+              <p className="text-xs text-gray-400">
+                总 Agent：{agents.length} 个
+              </p>
+              <p className="text-xs text-gray-400">
+                自定义 Agent：{customAgents.length} 个
+              </p>
+              <p className="text-xs text-gray-400">
+                含覆盖字段：{overrideAgentsCount} 个
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h3 className="text-lg font-semibold text-white">
+                Default Agent
+              </h3>
+              <span className="rounded-md bg-dark-600 px-2 py-1 text-xs text-gray-400">
+                {Object.keys(bindingsMap).length} 条 bindings
+              </span>
+            </div>
+
+            {loading ? (
+              <p className="text-sm text-gray-500">正在加载 Agent 数据...</p>
+            ) : defaultAgent ? (
+              <div className="rounded-xl border border-claw-500/40 bg-claw-500/10 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="flex items-center gap-2 text-sm font-semibold text-white">
+                      <Bot size={16} className="text-claw-400" />
+                      <span className="break-all">{defaultAgent.id}</span>
+                    </p>
+                    <p className="mt-1 text-xs text-gray-400">
+                      ID 固定，name/workspace 可编辑
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {onOpenWorkspace && (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenWorkspace(defaultAgent.id)}
+                        className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
+                      >
+                        <Settings2 size={12} />
+                        详情配置
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleDuplicateAgent(defaultAgent.id)}
+                      className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
+                    >
+                      <Copy size={12} />
+                      复制 Agent
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="flex flex-col gap-1 text-xs text-gray-300">
+                    <span className="text-gray-400">名称（name）</span>
+                    <input
+                      type="text"
+                      value={defaultAgent.name}
+                      onChange={(event) =>
+                        handleUpdateAgentField(
+                          defaultAgent.id,
+                          "name",
+                          event.target.value
+                        )
+                      }
+                      placeholder="未命名 Agent"
+                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs text-gray-300">
+                    <span className="text-gray-400">工作目录（workspace）</span>
+                    <input
+                      type="text"
+                      value={defaultAgent.workspace}
+                      onChange={(event) =>
+                        handleUpdateAgentField(
+                          defaultAgent.id,
+                          "workspace",
+                          event.target.value
+                        )
+                      }
+                      placeholder="例如 /home/openclaw-manager"
+                      className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                    />
+                  </label>
+                  <p className="text-xs text-gray-300">
+                    绑定账号数：{bindingCountByAgent[defaultAgent.id] ?? 0}
+                  </p>
+                  <p className="text-xs text-gray-300">
+                    覆盖字段：{Object.keys(defaultAgent.extra).length}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">
+                当前未检测到可用 Agent，请先在设置页创建。
+              </p>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-dark-500 bg-dark-700 p-6">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h3 className="text-lg font-semibold text-white">
+                自定义 Agent 列表
+              </h3>
+              <span className="rounded-md bg-dark-600 px-2 py-1 text-xs text-gray-400">
+                {customAgents.length} 项
+              </span>
+            </div>
+
+            {!loading && customAgents.length > 0 && (
+              <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-dark-500 bg-dark-700/40 p-3">
+                <label className="inline-flex items-center gap-2 text-xs text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={allCustomSelected}
+                    onChange={(event) =>
+                      handleSelectAllCustomAgents(event.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-dark-500 bg-dark-700 text-claw-500 focus:ring-claw-500"
+                  />
+                  全选
+                </label>
+                <span className="text-xs text-gray-400">
+                  已选 {selectedCustomAgentsCount} 项
+                </span>
+                <button
+                  type="button"
+                  onClick={handleBatchDuplicateSelected}
+                  disabled={selectedCustomAgentsCount === 0 || saving}
+                  className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-200 transition-colors hover:bg-dark-600 disabled:opacity-50"
+                >
+                  <Copy size={12} />
+                  批量复制选中
+                </button>
+                <button
+                  type="button"
+                  onClick={handleBatchDeleteSelected}
+                  disabled={selectedCustomAgentsCount === 0 || saving}
+                  className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-red-500/30 bg-red-500/10 px-2 text-xs text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50"
+                >
+                  <Trash2 size={12} />
+                  批量删除选中
+                </button>
+              </div>
+            )}
+
+            {!loading && customAgents.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-dark-500 bg-dark-700/40 p-6 text-center text-sm text-gray-500">
+                暂无自定义 Agent，可前往设置页新增。
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {customAgents.map((agent) => (
+                  <div
+                    key={agent.id}
+                    className="rounded-xl border border-dark-500 bg-dark-700/50 p-4"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-start gap-2">
+                        <input
+                          type="checkbox"
+                          checked={selectedCustomAgentIds.has(agent.id)}
+                          onChange={(event) =>
+                            toggleSelectCustomAgent(
+                              agent.id,
+                              event.target.checked
+                            )
+                          }
+                          disabled={saving}
+                          className="mt-1 h-4 w-4 rounded border-dark-500 bg-dark-700 text-claw-500 focus:ring-claw-500"
+                        />
+                        <div className="min-w-0">
+                          <p className="break-all text-sm font-medium text-white">
+                            {agent.id}
+                          </p>
+                          <p className="mt-1 text-xs text-gray-400">
+                            ID 固定，name/workspace 可编辑
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {onOpenWorkspace && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenWorkspace(agent.id)}
+                            className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
+                          >
+                            <Settings2 size={12} />
+                            详情配置
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleSetDefault(agent.id)}
+                          className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
+                        >
+                          <Star size={12} />
+                          设为默认
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDuplicateAgent(agent.id)}
+                          className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-dark-500 bg-dark-700 px-2 text-xs text-gray-300 transition-colors hover:bg-dark-600"
+                        >
+                          <Copy size={12} />
+                          复制 Agent
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteAgent(agent.id)}
+                          className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-red-500/30 bg-red-500/10 px-2 text-xs text-red-300 transition-colors hover:bg-red-500/20"
+                        >
+                          <Trash2 size={12} />
+                          删除
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      <label className="flex flex-col gap-1 text-xs text-gray-300">
+                        <span className="text-gray-400">名称（name）</span>
+                        <input
+                          type="text"
+                          value={agent.name}
+                          onChange={(event) =>
+                            handleUpdateAgentField(
+                              agent.id,
+                              "name",
+                              event.target.value
+                            )
+                          }
+                          placeholder="未命名 Agent"
+                          className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs text-gray-300">
+                        <span className="text-gray-400">
+                          工作目录（workspace）
+                        </span>
+                        <input
+                          type="text"
+                          value={agent.workspace}
+                          onChange={(event) =>
+                            handleUpdateAgentField(
+                              agent.id,
+                              "workspace",
+                              event.target.value
+                            )
+                          }
+                          placeholder="例如 /home/openclaw-manager"
+                          className="min-h-[36px] rounded-md border border-dark-500 bg-dark-700 px-2 text-sm text-white placeholder:text-gray-500 focus:border-claw-500 focus:outline-none"
+                        />
+                      </label>
+                      <p className="text-xs text-gray-300">
+                        绑定账号数：{bindingCountByAgent[agent.id] ?? 0}
+                      </p>
+                      <p className="text-xs text-gray-300">
+                        覆盖字段：{Object.keys(agent.extra).length}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }

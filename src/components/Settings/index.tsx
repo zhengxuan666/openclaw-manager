@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invokeCommand as invoke } from "../../lib/invoke";
+import { useStagingSession } from "../../contexts/StagingSessionContext";
 import {
   User,
   Shield,
@@ -48,54 +49,6 @@ interface ChannelConfig {
   enabled: boolean;
   config: Record<string, unknown>;
   accounts?: Record<string, Record<string, unknown>>;
-}
-
-interface ConfigValidationIssue {
-  path: string;
-  message: string;
-  variable?: string;
-}
-
-interface ConfigValidationResult {
-  valid: boolean;
-  issues: ConfigValidationIssue[];
-}
-
-interface ConfigDiffItem {
-  kind: "added" | "modified" | "removed";
-  path: string;
-  before?: unknown;
-  after?: unknown;
-  masked: boolean;
-}
-
-interface ConfigDiffSummary {
-  added: number;
-  modified: number;
-  removed: number;
-  changes: ConfigDiffItem[];
-}
-
-interface PreviewConfigResponse {
-  preview_config: unknown;
-  diff_summary: ConfigDiffSummary;
-  validation: ConfigValidationResult;
-}
-
-interface ApplyConfigResponse {
-  backup_path: string;
-  applied_at: string;
-}
-
-interface RollbackConfigResponse {
-  restored_path: string;
-  restored_at: string;
-}
-
-interface ConfigBackupItem {
-  path: string;
-  createdAt: string;
-  size: number;
 }
 
 interface VisualAgent {
@@ -560,7 +513,6 @@ const RUNTIME_STATUS_META: Record<
 };
 
 const BINDING_KEY_SEPARATOR = "::";
-const MAX_DIFF_DISPLAY = 200;
 const WEB_HEARTBEAT_MIN_SECONDS = 5;
 const WEB_RECONNECT_INITIAL_MS_MIN = 100;
 const WEB_RECONNECT_MAX_MS_MIN = 500;
@@ -652,27 +604,6 @@ const GATEWAY_RELOAD_MODE_OPTIONS: Array<{
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function formatValuePreview(value: unknown): string {
-  if (value === undefined) {
-    return "-";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function formatValidationIssue(issue: ConfigValidationIssue): string {
-  if (issue.variable) {
-    return `${issue.path}：${issue.message}（${issue.variable}）`;
-  }
-  return `${issue.path}：${issue.message}`;
 }
 
 function normalizeAccounts(
@@ -857,6 +788,17 @@ function parseAgentsList(rawAgents: unknown): VisualAgent[] {
         }
       });
 
+      // 规范化 model 字段：将遗留的 fallbacks（复数）迁移到 fallback（单数）
+      // 与 AgentCenter/index.tsx 保持一致，防止 diff 出现字段名漂移
+      if (isRecord(extra.model)) {
+        const model = { ...extra.model };
+        if (model.fallbacks !== undefined && model.fallback === undefined) {
+          model.fallback = model.fallbacks;
+          delete model.fallbacks;
+          extra.model = model;
+        }
+      }
+
       return {
         id: typeof item.id === "string" ? item.id : "",
         name: typeof item.name === "string" ? item.name : "",
@@ -978,10 +920,6 @@ function toStableComparable(value: unknown): unknown {
   }
 
   return value;
-}
-
-function hasDiffSummaryChanges(summary: ConfigDiffSummary): boolean {
-  return summary.added + summary.modified + summary.removed > 0;
 }
 
 function cloneConfigRecord(
@@ -1203,7 +1141,7 @@ function serializeTrustedProxyInput(values: string[]): string {
 
 function detectGatewayBindPreset(bind: string): GatewayBindPreset {
   const normalized = bind.trim();
-  if (normalized === "127.0.0.1") {
+  if (normalized === "127.0.0.1" || normalized === "loopback") {
     return "loopback";
   }
   if (normalized === "0.0.0.0" || normalized === "::") {
@@ -2479,10 +2417,24 @@ export function buildPathScopedGlobalConfigPayload(
   return merged;
 }
 
+function buildIdentitySignature(id: {
+  botName: string;
+  userName: string;
+  timezone: string;
+}): string {
+  return JSON.stringify({
+    botName: (id.botName || "").trim(),
+    userName: (id.userName || "").trim(),
+    timezone: (id.timezone || "").trim(),
+  });
+}
+
 export function Settings({
   onEnvironmentChange,
   initialConfigCenterTab,
 }: SettingsProps) {
+  const { applyChange } = useStagingSession();
+
   const [identity, setIdentity] = useState({
     botName: "Clawd",
     userName: "主人",
@@ -2628,15 +2580,10 @@ export function Settings({
   const [visualBindings, setVisualBindings] = useState<VisualBinding[]>([]);
   const [bindingsRaw, setBindingsRaw] = useState<unknown>([]);
   const [channelsConfig, setChannelsConfig] = useState<ChannelConfig[]>([]);
-  const [previewResult, setPreviewResult] =
-    useState<PreviewConfigResponse | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
   const [applyLoading, setApplyLoading] = useState(false);
-  const [rollbackLoading, setRollbackLoading] = useState(false);
-  const [showRollbackDialog, setShowRollbackDialog] = useState(false);
-  const [backupOptions, setBackupOptions] = useState<ConfigBackupItem[]>([]);
-  const [selectedBackupPath, setSelectedBackupPath] = useState("");
   const [baselineManagedSignature, setBaselineManagedSignature] = useState("");
+  const [baselineIdentitySignature, setBaselineIdentitySignature] =
+    useState("");
 
   const managedConfigSignature = useMemo(() => {
     if (!expertMode) {
@@ -2697,19 +2644,24 @@ export function Settings({
     bindingsText,
   ]);
 
+  const identitySignature = useMemo(() => {
+    return buildIdentitySignature(identity);
+  }, [identity]);
+
   const hasPendingChanges = useMemo(() => {
     if (!baselineManagedSignature) {
       return false;
     }
-    return managedConfigSignature !== baselineManagedSignature;
-  }, [managedConfigSignature, baselineManagedSignature]);
-
-  const previewHasChanges = useMemo(() => {
-    if (!previewResult) {
-      return true;
-    }
-    return hasDiffSummaryChanges(previewResult.diff_summary);
-  }, [previewResult]);
+    return (
+      managedConfigSignature !== baselineManagedSignature ||
+      identitySignature !== baselineIdentitySignature
+    );
+  }, [
+    managedConfigSignature,
+    baselineManagedSignature,
+    identitySignature,
+    baselineIdentitySignature,
+  ]);
 
   const channelOptions = useMemo(() => {
     return Array.from(new Set(channelsConfig.map((channel) => channel.id)));
@@ -2902,32 +2854,6 @@ export function Settings({
     return null;
   }, [hooksPathInput, hooksMaxBodyBytesInput]);
 
-  const runtimeValidationHint =
-    gatewayValidationHint ||
-    messagesHistoryLimitHint ||
-    webValidationHint ||
-    toolsConflictHint ||
-    heartbeatValidationHint ||
-    cronValidationHint ||
-    hooksValidationHint;
-
-  const canApplyConfig =
-    hasPendingChanges &&
-    previewHasChanges &&
-    !applyLoading &&
-    !previewLoading &&
-    !rollbackLoading &&
-    !runtimeValidationHint &&
-    (previewResult === null || previewResult.validation.valid);
-
-  const applyDisabledReason = !hasPendingChanges
-    ? "无配置变更"
-    : !previewHasChanges
-    ? "无配置变更"
-    : runtimeValidationHint
-    ? runtimeValidationHint
-    : null;
-
   const syncJsonTextFromVisual = (
     nextAgents: VisualAgent[],
     nextBindings: VisualBinding[],
@@ -2941,7 +2867,18 @@ export function Settings({
     setBindingsText(JSON.stringify(bindingsPayload, null, 2));
   };
 
+  const loadFullConfigSnapshot = async (): Promise<Record<string, unknown>> => {
+    const staged = await invoke<Record<string, unknown> | null>(
+      "staging_session_get_config"
+    );
+    if (staged && typeof staged === "object" && !Array.isArray(staged)) {
+      return staged;
+    }
+    return invoke<Record<string, unknown>>("get_config");
+  };
+
   const buildGlobalInputConfigPayload = async (
+    fullConfig: Record<string, unknown>,
     agentsList: Record<string, unknown>[],
     bindingsPayload: BindingsPayload,
     managedGateway: ManagedGatewayConfig,
@@ -2953,7 +2890,6 @@ export function Settings({
     managedCron: ManagedCronConfig,
     managedHooks: ManagedHooksConfig
   ) => {
-    const fullConfig = await invoke<Record<string, unknown>>("get_config");
     return buildPathScopedGlobalConfigPayload({
       fullConfig,
       agentsList,
@@ -3093,56 +3029,9 @@ export function Settings({
     };
   };
 
-  const handlePreviewConfig = async () => {
-    setPreviewLoading(true);
-    setConfigError(null);
-    setConfigMessage(null);
-    setPreviewResult(null);
-
-    try {
-      const payload = buildInputConfigPayload();
-      const globalInputConfig = await buildGlobalInputConfigPayload(
-        buildAgentsPayload(payload.normalizedAgents),
-        payload.bindingsPayload,
-        payload.normalizedGateway,
-        payload.normalizedCommands,
-        payload.normalizedMessages,
-        payload.normalizedWeb,
-        payload.normalizedTools,
-        payload.normalizedHeartbeat,
-        payload.normalizedCron,
-        payload.normalizedHooks
-      );
-      const result = await invoke<PreviewConfigResponse>(
-        "preview_config_change",
-        {
-          inputConfig: globalInputConfig,
-        }
-      );
-
-      setPreviewResult(result);
-      if (!result.validation.valid) {
-        setConfigError(
-          `预校验失败（${
-            result.validation.issues.length
-          } 项）：${result.validation.issues
-            .slice(0, 3)
-            .map((issue) => formatValidationIssue(issue))
-            .join("；")}`
-        );
-      }
-    } catch (e) {
-      console.error("生成预览失败:", e);
-      setPreviewResult(null);
-      setConfigError(`生成预览失败: ${String(e)}`);
-    } finally {
-      setPreviewLoading(false);
-    }
-  };
-
-  const handleApplyConfig = async () => {
+  const handleStageConfig = async () => {
     if (!hasPendingChanges) {
-      setConfigMessage("无配置变更，无需应用");
+      setConfigMessage("无配置变更，无需保存到 Session");
       return;
     }
 
@@ -3152,7 +3041,9 @@ export function Settings({
 
     try {
       const payload = buildInputConfigPayload();
+      const fullConfig = await loadFullConfigSnapshot();
       const globalInputConfig = await buildGlobalInputConfigPayload(
+        fullConfig,
         buildAgentsPayload(payload.normalizedAgents),
         payload.bindingsPayload,
         payload.normalizedGateway,
@@ -3165,33 +3056,10 @@ export function Settings({
         payload.normalizedHooks
       );
 
-      const preview = await invoke<PreviewConfigResponse>(
-        "preview_config_change",
-        {
-          inputConfig: globalInputConfig,
-        }
-      );
-      setPreviewResult(preview);
-
-      if (!preview.validation.valid) {
-        setConfigError(
-          `校验未通过，禁止应用：${preview.validation.issues
-            .map((issue) => formatValidationIssue(issue))
-            .join("；")}`
-        );
-        return;
-      }
-
-      if (!hasDiffSummaryChanges(preview.diff_summary)) {
-        setConfigMessage("无配置变更，无需应用");
-        return;
-      }
-
-      const applyResult = await invoke<ApplyConfigResponse>(
-        "apply_config_change",
-        {
-          inputConfig: globalInputConfig,
-        }
+      await applyChange(
+        "replace_full_config",
+        { config: globalInputConfig },
+        "Settings: 保存 Agent/Binding/Runtime 配置"
       );
 
       setVisualAgents(payload.normalizedAgents);
@@ -3261,6 +3129,7 @@ export function Settings({
       setHooksPathInput(payload.normalizedHooks.path);
       setHooksTokenInput(payload.normalizedHooks.token);
       setHooksMaxBodyBytesInput(String(payload.normalizedHooks.maxBodyBytes));
+
       setBaselineManagedSignature(
         buildManagedConfigSignature(
           payload.normalizedAgents,
@@ -3275,110 +3144,13 @@ export function Settings({
           payload.normalizedHooks
         )
       );
-      setConfigMessage(
-        `配置已应用（备份：${applyResult.backup_path}，时间：${applyResult.applied_at}）`
-      );
+      setBaselineIdentitySignature(buildIdentitySignature(identity));
+      setConfigMessage("配置已写入 Session，请在侧边栏统一保存");
     } catch (e) {
-      console.error("应用配置失败:", e);
-      setConfigError(`应用配置失败: ${String(e)}`);
+      console.error("保存到 Session 失败:", e);
+      setConfigError(`保存失败: ${String(e)}`);
     } finally {
       setApplyLoading(false);
-    }
-  };
-
-  const handleOpenRollbackDialog = async () => {
-    setConfigError(null);
-    setConfigMessage(null);
-
-    try {
-      const backups = await invoke<ConfigBackupItem[]>("list_config_backups");
-      if (!Array.isArray(backups) || backups.length === 0) {
-        throw new Error("未找到可用备份，请先应用一次配置生成备份");
-      }
-
-      setBackupOptions(backups);
-      setSelectedBackupPath(backups[0]?.path ?? "");
-      setShowRollbackDialog(true);
-    } catch (e) {
-      console.error("获取备份列表失败:", e);
-      setConfigError(`获取备份列表失败: ${String(e)}`);
-    } finally {
-      setRollbackLoading(false);
-    }
-  };
-
-  const handleConfirmRollback = async () => {
-    if (!selectedBackupPath) {
-      setConfigError("请先选择要回滚的备份版本");
-      return;
-    }
-
-    setRollbackLoading(true);
-    setConfigError(null);
-    setConfigMessage(null);
-
-    try {
-      const result = await invoke<RollbackConfigResponse>("rollback_config", {
-        backupPath: selectedBackupPath,
-      });
-
-      const [agentsResult, bindingsResult, channelsResult, fullConfigResult] =
-        await Promise.all([
-          invoke<unknown>("get_agents_list"),
-          invoke<unknown>("get_bindings"),
-          invoke<ChannelConfig[]>("get_channels_config"),
-          invoke<Record<string, unknown>>("get_config"),
-        ]);
-
-      const nextVisualAgents = parseAgentsList(agentsResult);
-      const nextVisualBindings = bindingsMapToRules(
-        parseBindings(bindingsResult)
-      );
-      const nextGatewayConfig = parseGatewayConfig(fullConfigResult);
-      const {
-        nextCommandsConfig,
-        nextMessagesConfig,
-        nextWebConfig,
-        nextToolsConfig,
-        nextHeartbeatConfig,
-        nextCronConfig,
-        nextHooksConfig,
-      } = applyRuntimeConfigSnapshot(fullConfigResult);
-
-      setVisualAgents(nextVisualAgents);
-      setVisualBindings(nextVisualBindings);
-      setBindingsRaw(bindingsResult);
-      setAgentsListText(JSON.stringify(agentsResult ?? [], null, 2));
-      setBindingsText(JSON.stringify(bindingsResult ?? [], null, 2));
-      setGatewayConfig(nextGatewayConfig);
-      setGatewayPortInput(String(nextGatewayConfig.port));
-      setGatewayTrustedProxyInput(nextGatewayConfig.trustedProxies.join("\n"));
-      setGatewayBindPreset(detectGatewayBindPreset(nextGatewayConfig.bind));
-      setChannelsConfig(channelsResult ?? []);
-      setPreviewResult(null);
-      setBaselineManagedSignature(
-        buildManagedConfigSignature(
-          nextVisualAgents,
-          nextVisualBindings,
-          nextGatewayConfig,
-          nextCommandsConfig,
-          nextMessagesConfig,
-          nextWebConfig,
-          nextToolsConfig,
-          nextHeartbeatConfig,
-          nextCronConfig,
-          nextHooksConfig
-        )
-      );
-      setShowRollbackDialog(false);
-      setConfigMessage(
-        `已回滚到备份：${result.restored_path}（${result.restored_at}）`
-      );
-    } catch (e) {
-      console.error("回滚失败:", e);
-      setConfigError(`回滚失败: ${String(e)}`);
-    } finally {
-      setRollbackLoading(false);
     }
   };
 
@@ -3441,34 +3213,21 @@ export function Settings({
       setConfigError(null);
 
       try {
-        const [agentsResult, bindingsResult, channelsResult, fullConfigResult] =
-          await Promise.allSettled([
-            invoke<unknown>("get_agents_list"),
-            invoke<unknown>("get_bindings"),
-            invoke<ChannelConfig[]>("get_channels_config"),
-            invoke<Record<string, unknown>>("get_config"),
-          ]);
+        const [fullConfigResult, channelsResult] = await Promise.allSettled([
+          loadFullConfigSnapshot(),
+          invoke<ChannelConfig[]>("get_channels_config"),
+        ]);
 
         const warnings: string[] = [];
 
-        const agentsList =
-          agentsResult.status === "fulfilled" ? agentsResult.value : [];
-        if (agentsResult.status === "rejected") {
+        const loadedFullConfig: Record<string, unknown> =
+          fullConfigResult.status === "fulfilled" ? fullConfigResult.value : {};
+        if (fullConfigResult.status === "rejected") {
           console.warn(
-            "获取 agents.list 失败，已降级为空:",
-            agentsResult.reason
+            "获取完整配置失败，已回退默认值:",
+            fullConfigResult.reason
           );
-          warnings.push("获取 agents.list 失败，已降级为空");
-        }
-
-        const loadedBindings =
-          bindingsResult.status === "fulfilled" ? bindingsResult.value : [];
-        if (bindingsResult.status === "rejected") {
-          console.warn(
-            "获取 bindings 失败，已降级为空:",
-            bindingsResult.reason
-          );
-          warnings.push("获取 bindings 失败，已降级为空");
+          warnings.push("获取完整配置失败，已回退默认值");
         }
 
         const loadedChannels =
@@ -3481,24 +3240,17 @@ export function Settings({
           warnings.push("获取渠道配置失败，已降级为空");
         }
 
-        const loadedFullConfig =
-          fullConfigResult.status === "fulfilled" ? fullConfigResult.value : {};
-        if (fullConfigResult.status === "rejected") {
-          console.warn(
-            "获取完整配置失败，Gateway 配置回退默认值:",
-            fullConfigResult.reason
-          );
-          warnings.push("获取 gateway 配置失败，已回退默认值");
-        }
+        const agentsSource = isRecord(loadedFullConfig.agents)
+          ? (loadedFullConfig.agents as Record<string, unknown>).list
+          : [];
+        const bindingsSource = isRecord(loadedFullConfig)
+          ? loadedFullConfig.bindings
+          : [];
 
-        const parsedBindings = bindingsMapToRules(
-          parseBindings(loadedBindings)
+        const nextVisualAgents = parseAgentsList(agentsSource);
+        const nextVisualBindings = bindingsMapToRules(
+          parseBindings(bindingsSource)
         );
-
-        setAgentsListText(JSON.stringify(agentsList ?? [], null, 2));
-        setBindingsText(JSON.stringify(loadedBindings ?? [], null, 2));
-        const nextVisualAgents = parseAgentsList(agentsList);
-        const nextVisualBindings = parsedBindings;
         const nextGatewayConfig = parseGatewayConfig(loadedFullConfig);
         const {
           nextCommandsConfig,
@@ -3510,9 +3262,11 @@ export function Settings({
           nextHooksConfig,
         } = applyRuntimeConfigSnapshot(loadedFullConfig);
 
+        setAgentsListText(JSON.stringify(agentsSource ?? [], null, 2));
+        setBindingsText(JSON.stringify(bindingsSource ?? [], null, 2));
         setVisualAgents(nextVisualAgents);
         setVisualBindings(nextVisualBindings);
-        setBindingsRaw(loadedBindings ?? []);
+        setBindingsRaw(bindingsSource ?? []);
         setChannelsConfig(loadedChannels ?? []);
         setGatewayConfig(nextGatewayConfig);
         setGatewayPortInput(String(nextGatewayConfig.port));
@@ -3520,6 +3274,50 @@ export function Settings({
           serializeTrustedProxyInput(nextGatewayConfig.trustedProxies)
         );
         setGatewayBindPreset(detectGatewayBindPreset(nextGatewayConfig.bind));
+        setCommandsConfig(nextCommandsConfig);
+        setCommandAllowFromInput(
+          (nextCommandsConfig.allowFromAll ?? []).join("\n")
+        );
+        setMessagesConfig(nextMessagesConfig);
+        setMessagesHistoryLimitInput(
+          String(nextMessagesConfig.groupChatHistoryLimit)
+        );
+        setWebConfig(nextWebConfig);
+        setWebHeartbeatInput(String(nextWebConfig.heartbeatSeconds));
+        setWebReconnectInitialMsInput(
+          String(nextWebConfig.reconnect.initialMs)
+        );
+        setWebReconnectMaxMsInput(String(nextWebConfig.reconnect.maxMs));
+        setWebReconnectFactorInput(String(nextWebConfig.reconnect.factor));
+        setWebReconnectJitterInput(String(nextWebConfig.reconnect.jitter));
+        setWebReconnectMaxAttemptsInput(
+          String(nextWebConfig.reconnect.maxAttempts)
+        );
+        setToolsConfig(nextToolsConfig);
+        setToolsAllowInput(nextToolsConfig.allow.join("\n"));
+        setToolsDenyInput(nextToolsConfig.deny.join("\n"));
+        setHeartbeatConfig(nextHeartbeatConfig);
+        setHeartbeatEveryInput(nextHeartbeatConfig.every);
+        setHeartbeatModelInput(nextHeartbeatConfig.model);
+        setHeartbeatTargetInput(nextHeartbeatConfig.target);
+        setHeartbeatPromptInput(nextHeartbeatConfig.prompt);
+        setHeartbeatAckMaxCharsInput(String(nextHeartbeatConfig.ackMaxChars));
+        setCronConfig(nextCronConfig);
+        setCronMaxConcurrentRunsInput(String(nextCronConfig.maxConcurrentRuns));
+        setCronSessionRetentionDisabled(
+          nextCronConfig.sessionRetention === false
+        );
+        setCronSessionRetentionInput(
+          nextCronConfig.sessionRetention === false
+            ? ""
+            : nextCronConfig.sessionRetention
+        );
+        setCronWebhookInput(nextCronConfig.webhook);
+        setCronWebhookTokenInput(nextCronConfig.webhookToken);
+        setHooksConfig(nextHooksConfig);
+        setHooksPathInput(nextHooksConfig.path);
+        setHooksTokenInput(nextHooksConfig.token);
+        setHooksMaxBodyBytesInput(String(nextHooksConfig.maxBodyBytes));
 
         setBaselineManagedSignature(
           buildManagedConfigSignature(
@@ -3535,12 +3333,13 @@ export function Settings({
             nextHooksConfig
           )
         );
+        setBaselineIdentitySignature(buildIdentitySignature(identity));
 
         if (warnings.length > 0) {
           setConfigError(warnings.join("；"));
         }
       } catch (e) {
-        console.error("加载 agents.list / bindings 失败:", e);
+        console.error("加载 Settings 配置失败:", e);
         setConfigError(String(e));
       } finally {
         setConfigLoading(false);
@@ -3549,6 +3348,17 @@ export function Settings({
 
     loadAgentAndBindingConfig();
   }, []);
+
+  // 自动写入 Session：配置有变更时 debounce 触发
+  useEffect(() => {
+    if (!hasPendingChanges || applyLoading) return;
+    if (managedConfigSignature === "__invalid__") return;
+    const timer = setTimeout(() => {
+      void handleStageConfig();
+    }, 800);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasPendingChanges, managedConfigSignature, identitySignature]);
 
   const syncVisualModeFromJson = (): boolean => {
     try {
@@ -3828,10 +3638,6 @@ export function Settings({
     setConfigError(null);
     setConfigMessage(null);
     setVisualBindings((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const saveAgentAndBindingConfig = async () => {
-    await handleApplyConfig();
   };
 
   const handleGatewayPortInputChange = (value: string) => {
@@ -5459,131 +5265,6 @@ export function Settings({
           </div>
         </div>
       )}
-
-      <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-3">
-        <div className="text-xs text-gray-400">
-          新流程：先“生成预览”→查看差异/校验→“应用配置”（自动备份）→可“选择备份并回滚”。
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <button
-            onClick={handlePreviewConfig}
-            disabled={previewLoading || applyLoading || rollbackLoading}
-            className="btn-secondary flex items-center justify-center gap-2"
-          >
-            {previewLoading ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <FileCode size={16} />
-            )}
-            生成预览
-          </button>
-
-          <button
-            type="button"
-            disabled={!previewResult}
-            onClick={() => {
-              if (!previewResult) return;
-              const summary = previewResult.diff_summary;
-              const sample = summary.changes
-                .slice(0, 10)
-                .map(
-                  (item) =>
-                    `[${item.kind}] ${item.path} | ${formatValuePreview(
-                      item.before
-                    )} -> ${formatValuePreview(item.after)}${
-                      item.masked ? " (masked)" : ""
-                    }`
-                )
-                .join("\n");
-              alert(
-                `变更摘要：新增 ${summary.added}，修改 ${
-                  summary.modified
-                }，删除 ${summary.removed}\n\n${sample || "无差异"}`
-              );
-            }}
-            className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            <Link2 size={16} />
-            查看变更摘要
-          </button>
-
-          <button
-            onClick={handleOpenRollbackDialog}
-            disabled={rollbackLoading || previewLoading || applyLoading}
-            className="btn-secondary flex items-center justify-center gap-2"
-          >
-            {rollbackLoading ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Trash2 size={16} />
-            )}
-            选择备份并回滚
-          </button>
-
-          <button
-            onClick={saveAgentAndBindingConfig}
-            disabled={!canApplyConfig}
-            title={applyDisabledReason ?? undefined}
-            className="btn-primary flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            {applyLoading ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Save size={16} />
-            )}
-            应用配置
-          </button>
-          {applyDisabledReason && (
-            <div className="text-xs text-gray-500 sm:col-span-2 text-center">
-              {applyDisabledReason}
-            </div>
-          )}
-        </div>
-
-        {previewResult && (
-          <div className="text-xs text-gray-400 space-y-2">
-            <div>
-              预览差异：新增 {previewResult.diff_summary.added}，修改{" "}
-              {previewResult.diff_summary.modified}，删除{" "}
-              {previewResult.diff_summary.removed}
-            </div>
-            <div>
-              预校验：
-              {previewResult.validation.valid
-                ? "通过"
-                : `失败（${previewResult.validation.issues.length} 项）`}
-            </div>
-            {!previewResult.validation.valid && (
-              <div className="text-amber-300">
-                校验失败详情已通过弹框提示，请先修复后再应用。
-              </div>
-            )}
-            {previewResult.diff_summary.changes.length > 0 && (
-              <div className="max-h-44 overflow-auto rounded-lg border border-dark-500 p-2 bg-dark-700/60 space-y-1">
-                {previewResult.diff_summary.changes
-                  .slice(0, MAX_DIFF_DISPLAY)
-                  .map((item, idx) => (
-                    <div key={`${item.path}-${idx}`}>
-                      <span className="text-cyan-300">[{item.kind}]</span>{" "}
-                      <span className="text-gray-300">{item.path}</span>
-                      <span className="text-gray-500"> | </span>
-                      <span className="text-gray-400">
-                        {formatValuePreview(item.before)} →{" "}
-                        {formatValuePreview(item.after)}
-                      </span>
-                      {item.masked && (
-                        <span className="text-amber-300">
-                          （敏感字段已掩码）
-                        </span>
-                      )}
-                    </div>
-                  ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
     </div>
   );
 
@@ -6230,141 +5911,6 @@ export function Settings({
                     </div>
                   </div>
                 )}
-
-                <div className="rounded-xl border border-dark-500 bg-dark-600 p-4 space-y-3">
-                  <div className="text-xs text-gray-400">
-                    新流程：先“生成预览”→查看差异/校验→“应用配置”（自动备份）→可“选择备份并回滚”。
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <button
-                      onClick={handlePreviewConfig}
-                      disabled={
-                        previewLoading || applyLoading || rollbackLoading
-                      }
-                      className="btn-secondary flex items-center justify-center gap-2"
-                    >
-                      {previewLoading ? (
-                        <Loader2 size={16} className="animate-spin" />
-                      ) : (
-                        <FileCode size={16} />
-                      )}
-                      生成预览
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={!previewResult}
-                      onClick={() => {
-                        if (!previewResult) return;
-                        const summary = previewResult.diff_summary;
-                        const sample = summary.changes
-                          .slice(0, 10)
-                          .map(
-                            (item) =>
-                              `[${item.kind}] ${
-                                item.path
-                              } | ${formatValuePreview(
-                                item.before
-                              )} -> ${formatValuePreview(item.after)}${
-                                item.masked ? " (masked)" : ""
-                              }`
-                          )
-                          .join("\n");
-                        alert(
-                          `变更摘要：新增 ${summary.added}，修改 ${
-                            summary.modified
-                          }，删除 ${summary.removed}\n\n${sample || "无差异"}`
-                        );
-                      }}
-                      className="btn-secondary flex items-center justify-center gap-2 disabled:opacity-50"
-                    >
-                      <Link2 size={16} />
-                      查看变更摘要
-                    </button>
-
-                    <button
-                      onClick={handleOpenRollbackDialog}
-                      disabled={
-                        rollbackLoading || previewLoading || applyLoading
-                      }
-                      className="btn-secondary flex items-center justify-center gap-2"
-                    >
-                      {rollbackLoading ? (
-                        <Loader2 size={16} className="animate-spin" />
-                      ) : (
-                        <Trash2 size={16} />
-                      )}
-                      选择备份并回滚
-                    </button>
-
-                    <button
-                      onClick={saveAgentAndBindingConfig}
-                      disabled={!canApplyConfig}
-                      title={applyDisabledReason ?? undefined}
-                      className="btn-primary flex items-center justify-center gap-2 disabled:opacity-50"
-                    >
-                      {applyLoading ? (
-                        <Loader2 size={16} className="animate-spin" />
-                      ) : (
-                        <Save size={16} />
-                      )}
-                      应用配置
-                    </button>
-                    {applyDisabledReason && (
-                      <div className="text-xs text-gray-500 sm:col-span-2 text-center">
-                        {applyDisabledReason}
-                      </div>
-                    )}
-                  </div>
-
-                  {previewResult && (
-                    <div className="text-xs text-gray-400 space-y-2">
-                      <div>
-                        预览差异：新增 {previewResult.diff_summary.added}，修改{" "}
-                        {previewResult.diff_summary.modified}，删除{" "}
-                        {previewResult.diff_summary.removed}
-                      </div>
-                      <div>
-                        预校验：
-                        {previewResult.validation.valid
-                          ? "通过"
-                          : `失败（${previewResult.validation.issues.length} 项）`}
-                      </div>
-                      {!previewResult.validation.valid && (
-                        <div className="text-amber-300">
-                          校验失败详情已通过弹框提示，请先修复后再应用。
-                        </div>
-                      )}
-                      {previewResult.diff_summary.changes.length > 0 && (
-                        <div className="max-h-44 overflow-auto rounded-lg border border-dark-500 p-2 bg-dark-700/60 space-y-1">
-                          {previewResult.diff_summary.changes
-                            .slice(0, MAX_DIFF_DISPLAY)
-                            .map((item, idx) => (
-                              <div key={`${item.path}-${idx}`}>
-                                <span className="text-cyan-300">
-                                  [{item.kind}]
-                                </span>{" "}
-                                <span className="text-gray-300">
-                                  {item.path}
-                                </span>
-                                <span className="text-gray-500"> | </span>
-                                <span className="text-gray-400">
-                                  {formatValuePreview(item.before)} →{" "}
-                                  {formatValuePreview(item.after)}
-                                </span>
-                                {item.masked && (
-                                  <span className="text-amber-300">
-                                    （敏感字段已掩码）
-                                  </span>
-                                )}
-                              </div>
-                            ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
               </div>
             </div>
 
@@ -6425,94 +5971,6 @@ export function Settings({
                   className="px-4 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg transition-colors"
                 >
                   确定
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* 回滚确认对话框 */}
-        {showRollbackDialog && (
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-            <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500 max-w-xl w-full mx-4 shadow-2xl">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
-                    <AlertTriangle size={20} className="text-amber-300" />
-                  </div>
-                  <h3 className="text-lg font-semibold text-white">
-                    选择回滚版本
-                  </h3>
-                </div>
-                <button
-                  onClick={() => setShowRollbackDialog(false)}
-                  className="text-gray-400 hover:text-white transition-colors"
-                  disabled={rollbackLoading}
-                >
-                  <X size={20} />
-                </button>
-              </div>
-
-              <p className="text-sm text-gray-300 mb-4">
-                请选择要还原的备份版本，然后点击确认执行回滚。
-              </p>
-
-              <div className="max-h-72 overflow-auto space-y-2 mb-5">
-                {backupOptions.map((item) => {
-                  const selected = selectedBackupPath === item.path;
-                  return (
-                    <label
-                      key={item.path}
-                      className={`block rounded-lg border p-3 cursor-pointer transition-colors ${
-                        selected
-                          ? "border-claw-500 bg-claw-500/10"
-                          : "border-dark-500 bg-dark-600 hover:bg-dark-500"
-                      }`}
-                    >
-                      <div className="flex items-start gap-3">
-                        <input
-                          type="radio"
-                          name="rollback-backup"
-                          checked={selected}
-                          onChange={() => setSelectedBackupPath(item.path)}
-                          className="mt-1"
-                        />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm text-white">{item.createdAt}</p>
-                          <p className="text-xs text-gray-400 break-all mt-1">
-                            {item.path}
-                          </p>
-                          <p className="text-xs text-gray-500 mt-1">
-                            {(item.size / 1024).toFixed(1)} KB
-                          </p>
-                        </div>
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setShowRollbackDialog(false)}
-                  className="flex-1 px-4 py-2.5 bg-dark-600 hover:bg-dark-500 text-white rounded-lg transition-colors"
-                  disabled={rollbackLoading}
-                >
-                  取消
-                </button>
-                <button
-                  onClick={handleConfirmRollback}
-                  disabled={rollbackLoading || !selectedBackupPath}
-                  className="flex-1 px-4 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {rollbackLoading ? (
-                    <>
-                      <Loader2 size={16} className="animate-spin" />
-                      回滚中...
-                    </>
-                  ) : (
-                    "确认回滚"
-                  )}
                 </button>
               </div>
             </div>

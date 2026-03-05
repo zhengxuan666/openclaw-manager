@@ -929,6 +929,68 @@ async fn dispatch_command(command: &str, args: &Value) -> Result<Value, String> 
             let channel_id = require_string(args, &["channelId", "channel_id"], "channelId")?;
             Ok(json!(config::clear_channel_config(channel_id).await?))
         }
+        // Staging preview/apply 命令
+        "preview_save_agents_list" => {
+            let agents_list = read_arg(args, &["agentsList", "agents_list", "agentsListJson", "agents_list_json"])
+                .cloned()
+                .ok_or_else(|| "缺少参数: agentsList".to_string())?;
+            Ok(json!(config::preview_save_agents_list(agents_list).await?))
+        }
+        "preview_save_channel_config" => {
+            let channel: models::ChannelConfig = read_arg(args, &["channel"])
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("channel 参数无效: {}", e))?
+                .ok_or_else(|| "缺少参数: channel".to_string())?;
+            Ok(json!(config::preview_save_channel_config(channel).await?))
+        }
+        "preview_clear_channel_config" => {
+            let channel_id = require_string(args, &["channelId", "channel_id"], "channelId")?;
+            Ok(json!(config::preview_clear_channel_config(channel_id).await?))
+        }
+        "preview_save_provider" => {
+            let provider_name = require_string(args, &["providerName", "provider_name"], "providerName")?;
+            let base_url = require_string(args, &["baseUrl", "base_url"], "baseUrl")?;
+            let api_key = read_arg(args, &["apiKey", "api_key"]).and_then(|v| v.as_str()).map(|v| v.to_string());
+            let api_type = require_string(args, &["apiType", "api_type"], "apiType")?;
+            let models: Vec<models::ModelConfig> = read_arg(args, &["models"])
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("models 参数无效: {}", e))?
+                .unwrap_or_default();
+            Ok(json!(config::preview_save_provider(provider_name, base_url, api_key, api_type, models).await?))
+        }
+        "preview_delete_provider" => {
+            let provider_name = require_string(args, &["providerName", "provider_name"], "providerName")?;
+            Ok(json!(config::preview_delete_provider(provider_name).await?))
+        }
+        "preview_set_primary_model" => {
+            let model_id = require_string(args, &["modelId", "model_id"], "modelId")?;
+            Ok(json!(config::preview_set_primary_model(model_id).await?))
+        }
+        "apply_staged_config" => {
+            let staging_id = require_string(args, &["stagingId", "staging_id"], "stagingId")?;
+            Ok(json!(config::apply_staged_config(staging_id).await?))
+        }
+        "discard_staged_config" => {
+            let staging_id = require_string(args, &["stagingId", "staging_id"], "stagingId")?;
+            Ok(json!(config::discard_staged_config(staging_id).await?))
+        }
+
+        // Staging session 命令
+        "staging_session_status" => Ok(json!(config::staging_session_status().await?)),
+        "staging_session_apply_change" => {
+            let request: config::StagingChangeRequest = serde_json::from_value(args.clone())
+                .map_err(|e| format!("staging_session_apply_change 参数无效: {}", e))?;
+            Ok(json!(config::staging_session_apply_change(request).await?))
+        }
+        "staging_session_preview" => Ok(json!(config::staging_session_preview().await?)),
+        "staging_session_apply" => Ok(json!(config::staging_session_apply().await?)),
+        "staging_session_discard" => Ok(json!(config::staging_session_discard().await?)),
+        "staging_session_get_config" => Ok(json!(config::staging_session_get_config().await?)),
+
         "check_feishu_plugin" => Ok(json!(config::check_feishu_plugin().await?)),
         "install_feishu_plugin" => Ok(json!(config::install_feishu_plugin().await?)),
 

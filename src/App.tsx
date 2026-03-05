@@ -20,6 +20,7 @@ import { Logs } from "./components/Logs";
 import { appLogger } from "./lib/logger";
 import { isTauri } from "./lib/tauri";
 import { Download, X, Loader2, CheckCircle, AlertCircle } from "lucide-react";
+import { StagingSessionProvider } from "./contexts/StagingSessionContext";
 
 export type PageType =
   | "dashboard"
@@ -305,14 +306,6 @@ function App() {
 
     if (page === "agent") {
       if (currentPage === "agent" && agentViewMode === "workspace") {
-        if (agentCenterDirty) {
-          const confirmed = window.confirm(
-            "当前 Agent 详情存在未保存变更，确认返回列表并保留草稿吗？"
-          );
-          if (!confirmed) {
-            return;
-          }
-        }
         openAgentList();
         return;
       }
@@ -479,103 +472,107 @@ function App() {
   }
 
   return (
-    <div className="app-viewport-height flex flex-col bg-dark-900 overflow-hidden md:flex-row">
-      <div className="fixed inset-0 bg-gradient-radial pointer-events-none" />
+    <StagingSessionProvider>
+      <div className="app-viewport-height flex flex-col bg-dark-900 overflow-hidden md:flex-row">
+        <div className="fixed inset-0 bg-gradient-radial pointer-events-none" />
 
-      <AnimatePresence>
-        {showUpdateBanner && updateInfo?.update_available && (
-          <motion.div
-            initial={{ opacity: 0, y: -50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -50 }}
-            className="fixed left-0 right-0 z-50 top-[calc(var(--mobile-header-height)+0.25rem)] bg-gradient-to-r from-claw-600 to-purple-600 shadow-lg md:top-0"
-          >
-            <div className="mx-auto flex w-full max-w-4xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-start gap-3">
-                {updateResult?.success ? (
-                  <CheckCircle size={20} className="mt-0.5 text-green-300" />
-                ) : updateResult && !updateResult.success ? (
-                  <AlertCircle size={20} className="mt-0.5 text-red-300" />
-                ) : (
-                  <Download size={20} className="mt-0.5 text-white" />
-                )}
-                <div>
-                  {updateResult ? (
-                    <p
-                      className={`text-sm font-medium ${
-                        updateResult.success ? "text-green-100" : "text-red-100"
-                      }`}
-                    >
-                      {updateResult.message}
-                    </p>
+        <AnimatePresence>
+          {showUpdateBanner && updateInfo?.update_available && (
+            <motion.div
+              initial={{ opacity: 0, y: -50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -50 }}
+              className="fixed left-0 right-0 z-50 top-[calc(var(--mobile-header-height)+0.25rem)] bg-gradient-to-r from-claw-600 to-purple-600 shadow-lg md:top-0"
+            >
+              <div className="mx-auto flex w-full max-w-4xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3">
+                  {updateResult?.success ? (
+                    <CheckCircle size={20} className="mt-0.5 text-green-300" />
+                  ) : updateResult && !updateResult.success ? (
+                    <AlertCircle size={20} className="mt-0.5 text-red-300" />
                   ) : (
-                    <>
-                      <p className="text-sm font-medium text-white">
-                        发现新版本 OpenClaw {updateInfo.latest_version}
-                      </p>
-                      <p className="text-xs text-white/70">
-                        当前版本: {updateInfo.current_version}
-                      </p>
-                    </>
+                    <Download size={20} className="mt-0.5 text-white" />
                   )}
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-2">
-                {!updateResult && (
-                  <button
-                    onClick={handleUpdate}
-                    disabled={updating}
-                    className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-white/20 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-white/30 disabled:opacity-50"
-                  >
-                    {updating ? (
-                      <>
-                        <Loader2 size={14} className="animate-spin" />
-                        更新中...
-                      </>
+                  <div>
+                    {updateResult ? (
+                      <p
+                        className={`text-sm font-medium ${
+                          updateResult.success
+                            ? "text-green-100"
+                            : "text-red-100"
+                        }`}
+                      >
+                        {updateResult.message}
+                      </p>
                     ) : (
                       <>
-                        <Download size={14} />
-                        立即更新
+                        <p className="text-sm font-medium text-white">
+                          发现新版本 OpenClaw {updateInfo.latest_version}
+                        </p>
+                        <p className="text-xs text-white/70">
+                          当前版本: {updateInfo.current_version}
+                        </p>
                       </>
                     )}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  {!updateResult && (
+                    <button
+                      onClick={handleUpdate}
+                      disabled={updating}
+                      className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-white/20 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-white/30 disabled:opacity-50"
+                    >
+                      {updating ? (
+                        <>
+                          <Loader2 size={14} className="animate-spin" />
+                          更新中...
+                        </>
+                      ) : (
+                        <>
+                          <Download size={14} />
+                          立即更新
+                        </>
+                      )}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      setShowUpdateBanner(false);
+                      setUpdateResult(null);
+                    }}
+                    className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg p-1.5 text-white/70 transition-colors hover:bg-white/20 hover:text-white"
+                  >
+                    <X size={16} />
                   </button>
-                )}
-                <button
-                  onClick={() => {
-                    setShowUpdateBanner(false);
-                    setUpdateResult(null);
-                  }}
-                  className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg p-1.5 text-white/70 transition-colors hover:bg-white/20 hover:text-white"
-                >
-                  <X size={16} />
-                </button>
+                </div>
               </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-      <Sidebar
-        currentPage={currentPage}
-        onNavigate={handleNavigate}
-        serviceStatus={serviceStatus}
-      />
-
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <Header
+        <Sidebar
           currentPage={currentPage}
-          webMode={webMode}
-          onLogout={webMode ? handleLogout : undefined}
+          onNavigate={handleNavigate}
+          serviceStatus={serviceStatus}
         />
-        <main
-          ref={mainScrollRef}
-          className="flex-1 min-h-0 min-w-0 overflow-hidden px-4 pb-[var(--mobile-bottom-nav-height)] pt-[calc(var(--mobile-header-height)+0.75rem)] md:p-6 md:pb-6 md:pt-6"
-        >
-          {renderPage()}
-        </main>
+
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <Header
+            currentPage={currentPage}
+            webMode={webMode}
+            onLogout={webMode ? handleLogout : undefined}
+          />
+          <main
+            ref={mainScrollRef}
+            className="flex-1 min-h-0 min-w-0 overflow-hidden px-4 pb-[var(--mobile-bottom-nav-height)] pt-[calc(var(--mobile-header-height)+0.75rem)] md:p-6 md:pb-6 md:pt-6"
+          >
+            {renderPage()}
+          </main>
+        </div>
       </div>
-    </div>
+    </StagingSessionProvider>
   );
 }
 

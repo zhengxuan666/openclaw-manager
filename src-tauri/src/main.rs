@@ -62,6 +62,22 @@ fn main() {
             config::set_primary_model,
             config::add_available_model,
             config::remove_available_model,
+            // Staging preview/apply 命令
+            config::preview_save_agents_list,
+            config::preview_save_channel_config,
+            config::preview_clear_channel_config,
+            config::preview_save_provider,
+            config::preview_delete_provider,
+            config::preview_set_primary_model,
+            config::apply_staged_config,
+            config::discard_staged_config,
+            // Staging session 命令
+            config::staging_session_status,
+            config::staging_session_apply_change,
+            config::staging_session_preview,
+            config::staging_session_apply,
+            config::staging_session_discard,
+            config::staging_session_get_config,
             // 飞书插件管理
             config::check_feishu_plugin,
             config::install_feishu_plugin,

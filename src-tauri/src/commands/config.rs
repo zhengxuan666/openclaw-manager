@@ -601,6 +601,123 @@ pub struct ConfigBackupItem {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedPreviewResponse {
+    pub staging_id: String,
+    pub diff_summary: ConfigDiffSummary,
+    pub validation: ConfigValidationResult,
+}
+
+// ============ Staging Session 管理 ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StagingSessionMeta {
+    session_id: String,
+    created_at: String,
+    updated_at: String,
+    change_count: u32,
+    change_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StagingSessionStatus {
+    active: bool,
+    session_id: Option<String>,
+    change_count: u32,
+    change_labels: Vec<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StagingChangeRequest {
+    operation: String,
+    args: Value,
+    label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StagingChangeResult {
+    session_id: String,
+    change_count: u32,
+    change_labels: Vec<String>,
+    instant_diff_summary: Option<ConfigDiffSummary>,
+}
+
+// Session 文件路径
+fn get_session_config_path() -> Result<PathBuf, String> {
+    let staging_dir = ensure_staging_dir()?;
+    Ok(staging_dir.join("session.json"))
+}
+
+fn get_session_meta_path() -> Result<PathBuf, String> {
+    let staging_dir = ensure_staging_dir()?;
+    Ok(staging_dir.join("session-meta.json"))
+}
+
+fn read_session_config() -> Result<Option<Value>, String> {
+    let path = get_session_config_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = file::read_file(&path.to_string_lossy())
+        .map_err(|e| format!("读取 session 配置失败: {}", e))?;
+    let config: Value = serde_json::from_str(&content)
+        .map_err(|e| format!("解析 session 配置失败: {}", e))?;
+    Ok(Some(config))
+}
+
+fn read_session_meta() -> Result<Option<StagingSessionMeta>, String> {
+    let path = get_session_meta_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = file::read_file(&path.to_string_lossy())
+        .map_err(|e| format!("读取 session 元信息失败: {}", e))?;
+    let meta: StagingSessionMeta = serde_json::from_str(&content)
+        .map_err(|e| format!("解析 session 元信息失败: {}", e))?;
+    Ok(Some(meta))
+}
+
+fn write_session_config(config: &Value) -> Result<(), String> {
+    let path = get_session_config_path()?;
+    let content = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("序列化 session 配置失败: {}", e))?;
+    file::write_file(&path.to_string_lossy(), &content)
+        .map_err(|e| format!("写入 session 配置失败: {}", e))?;
+    Ok(())
+}
+
+fn write_session_meta(meta: &StagingSessionMeta) -> Result<(), String> {
+    let path = get_session_meta_path()?;
+    let content = serde_json::to_string_pretty(meta)
+        .map_err(|e| format!("序列化 session 元信息失败: {}", e))?;
+    file::write_file(&path.to_string_lossy(), &content)
+        .map_err(|e| format!("写入 session 元信息失败: {}", e))?;
+    Ok(())
+}
+
+fn delete_session_files() -> Result<(), String> {
+    let config_path = get_session_config_path()?;
+    let meta_path = get_session_meta_path()?;
+    if config_path.exists() {
+        fs::remove_file(&config_path).map_err(|e| format!("删除 session 配置失败: {}", e))?;
+    }
+    if meta_path.exists() {
+        fs::remove_file(&meta_path).map_err(|e| format!("删除 session 元信息失败: {}", e))?;
+    }
+    Ok(())
+}
+
+fn generate_session_id() -> String {
+    use std::time::SystemTime;
+    let ts = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("session-{}", ts)
+}
+
 fn format_timestamp_from_system_time(system_time: std::time::SystemTime) -> String {
     match system_time.duration_since(UNIX_EPOCH) {
         Ok(duration) => match chrono::DateTime::<chrono::Utc>::from_timestamp(duration.as_secs() as i64, 0) {
@@ -968,6 +1085,67 @@ fn resolve_backup_path(backup_path: &str) -> PathBuf {
         PathBuf::from(platform::get_config_dir()).join(backup_path)
     }
 }
+
+// ============ Staging 暂存基础设施 ============
+
+fn generate_staging_id() -> String {
+    use std::time::SystemTime;
+    let ts = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("staged-{}", ts)
+}
+
+fn ensure_staging_dir() -> Result<PathBuf, String> {
+    let staging_dir = PathBuf::from(platform::get_config_dir()).join("staging");
+    fs::create_dir_all(&staging_dir).map_err(|e| format!("创建暂存目录失败: {}", e))?;
+    Ok(staging_dir)
+}
+
+fn write_staged_config(config: &Value) -> Result<String, String> {
+    let staging_dir = ensure_staging_dir()?;
+    let staging_id = generate_staging_id();
+    let staging_path = staging_dir.join(format!("{}.json", staging_id));
+    let content = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("序列化暂存配置失败: {}", e))?;
+    file::write_file(&staging_path.to_string_lossy(), &content)
+        .map_err(|e| format!("写入暂存配置失败: {}", e))?;
+    Ok(staging_id)
+}
+
+fn read_staged_config(staging_id: &str) -> Result<Value, String> {
+    let staging_dir = ensure_staging_dir()?;
+    let staging_path = staging_dir.join(format!("{}.json", staging_id));
+    if !staging_path.exists() {
+        return Err(format!("暂存配置 {} 不存在或已过期", staging_id));
+    }
+    let content = file::read_file(&staging_path.to_string_lossy())
+        .map_err(|e| format!("读取暂存配置失败: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("解析暂存配置失败: {}", e))
+}
+
+fn delete_staged_config(staging_id: &str) -> Result<(), String> {
+    let staging_dir = ensure_staging_dir()?;
+    let staging_path = staging_dir.join(format!("{}.json", staging_id));
+    if staging_path.exists() {
+        fs::remove_file(&staging_path).map_err(|e| format!("删除暂存配置失败: {}", e))?;
+    }
+    Ok(())
+}
+
+fn build_staged_preview(modified_config: &Value) -> Result<StagedPreviewResponse, String> {
+    let current_config = load_openclaw_config_raw()?;
+    let validation = validate_preview_input(modified_config);
+    let diff_summary = build_config_diff_summary(&current_config, modified_config);
+    let staging_id = write_staged_config(modified_config)?;
+    Ok(StagedPreviewResponse {
+        staging_id,
+        diff_summary,
+        validation,
+    })
+}
+
 /// 保存配置
 #[command]
 pub async fn save_config(mut config: Value) -> Result<String, String> {
@@ -1127,6 +1305,27 @@ pub async fn save_agents_list(agents_list: Value) -> Result<String, String> {
 
     info!("[Agents List] ✓ agents.list 保存成功");
     Ok("agents.list 已保存".to_string())
+}
+
+/// 构建 agents.list 修改后的完整配置（不保存）
+fn prepare_save_agents_list(base_config: &Value, agents_list: Value) -> Result<Value, String> {
+    if !agents_list.is_array() {
+        return Err("agents.list 结构无效：必须为数组".to_string());
+    }
+    let mut config = base_config.clone();
+    if config.get("agents").and_then(|v| v.as_object()).is_none() {
+        config["agents"] = json!({});
+    }
+    config["agents"]["list"] = agents_list;
+    Ok(config)
+}
+
+#[command]
+pub async fn preview_save_agents_list(agents_list: Value) -> Result<StagedPreviewResponse, String> {
+    info!("[Agents List Preview] 预览 agents.list 变更...");
+    let base = load_openclaw_config_raw()?;
+    let modified = prepare_save_agents_list(&base, agents_list)?;
+    build_staged_preview(&modified)
 }
 
 /// 获取 bindings（向后兼容：不存在时返回 []）
@@ -1801,6 +2000,145 @@ pub async fn save_provider(
     Ok(format!("Provider {} 已保存", provider_name))
 }
 
+/// 构建保存 Provider 后的完整配置（不保存）
+fn prepare_save_provider(
+    base_config: &Value,
+    provider_name: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    api_type: &str,
+    models: &[ModelConfig],
+) -> Result<Value, String> {
+    let mut config = base_config.clone();
+
+    // 确保路径存在
+    if config.get("models").is_none() {
+        config["models"] = json!({});
+    }
+    if config["models"].get("providers").is_none() {
+        config["models"]["providers"] = json!({});
+    }
+    if config.get("agents").is_none() {
+        config["agents"] = json!({});
+    }
+    if config["agents"].get("defaults").is_none() {
+        config["agents"]["defaults"] = json!({});
+    }
+    if config["agents"]["defaults"].get("models").is_none() {
+        config["agents"]["defaults"]["models"] = json!({});
+    }
+
+    // 构建模型配置
+    let models_json: Vec<Value> = models
+        .iter()
+        .map(|m| {
+            let mut model_obj = json!({
+                "id": m.id,
+                "name": m.name,
+                "api": m.api.clone().unwrap_or(api_type.to_string()),
+                "input": if m.input.is_empty() { vec!["text".to_string()] } else { m.input.clone() },
+            });
+
+            if let Some(cw) = m.context_window {
+                model_obj["contextWindow"] = json!(cw);
+            }
+            if let Some(mt) = m.max_tokens {
+                model_obj["maxTokens"] = json!(mt);
+            }
+            if let Some(r) = m.reasoning {
+                model_obj["reasoning"] = json!(r);
+            }
+            if let Some(cost) = &m.cost {
+                model_obj["cost"] = json!({
+                    "input": cost.input,
+                    "output": cost.output,
+                    "cacheRead": cost.cache_read,
+                    "cacheWrite": cost.cache_write,
+                });
+            } else {
+                model_obj["cost"] = json!({
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                });
+            }
+
+            model_obj
+        })
+        .collect();
+
+    // 构建 Provider 配置
+    let mut provider_config = json!({
+        "baseUrl": base_url,
+        "models": models_json,
+    });
+
+    // 处理 API Key
+    if let Some(key) = api_key {
+        if !key.is_empty() {
+            provider_config["apiKey"] = json!(key);
+        } else {
+            if let Some(existing_key) = config
+                .pointer(&format!("/models/providers/{}/apiKey", provider_name))
+                .and_then(|v| v.as_str())
+            {
+                provider_config["apiKey"] = json!(existing_key);
+            }
+        }
+    } else {
+        if let Some(existing_key) = config
+            .pointer(&format!("/models/providers/{}/apiKey", provider_name))
+            .and_then(|v| v.as_str())
+        {
+            provider_config["apiKey"] = json!(existing_key);
+        }
+    }
+
+    // 保存 Provider 配置
+    config["models"]["providers"][provider_name] = provider_config;
+
+    // 将模型添加到 agents.defaults.models
+    for model in models {
+        let full_id = format!("{}/{}", provider_name, model.id);
+        config["agents"]["defaults"]["models"][&full_id] = json!({});
+    }
+
+    // 更新元数据
+    let now = chrono::Utc::now().to_rfc3339();
+    if config.get("meta").is_none() {
+        config["meta"] = json!({});
+    }
+    config["meta"]["lastTouchedAt"] = json!(now);
+
+    Ok(config)
+}
+
+#[command]
+pub async fn preview_save_provider(
+    provider_name: String,
+    base_url: String,
+    api_key: Option<String>,
+    api_type: String,
+    models: Vec<ModelConfig>,
+) -> Result<StagedPreviewResponse, String> {
+    info!(
+        "[Provider Preview] 预览 Provider 变更: {} ({} 个模型)",
+        provider_name,
+        models.len()
+    );
+    let base = load_openclaw_config_raw()?;
+    let modified = prepare_save_provider(
+        &base,
+        &provider_name,
+        &base_url,
+        api_key.as_deref(),
+        &api_type,
+        &models,
+    )?;
+    build_staged_preview(&modified)
+}
+
 /// 删除 Provider
 #[command]
 pub async fn delete_provider(provider_name: String) -> Result<String, String> {
@@ -1844,8 +2182,45 @@ pub async fn delete_provider(provider_name: String) -> Result<String, String> {
 
     save_openclaw_config(&config)?;
     info!("[删除 Provider] ✓ Provider {} 已删除", provider_name);
+Ok(format!("Provider {} 已删除", provider_name))
+}
 
-    Ok(format!("Provider {} 已删除", provider_name))
+/// 构建删除 Provider 后的完整配置（不保存）
+fn prepare_delete_provider(base_config: &Value, provider_name: &str) -> Result<Value, String> {
+    let mut config = base_config.clone();
+    // Remove provider
+    if let Some(providers) = config.pointer_mut("/models/providers").and_then(|v| v.as_object_mut()) {
+        providers.remove(provider_name);
+    }
+    // Remove related models
+    if let Some(models) = config.pointer_mut("/agents/defaults/models").and_then(|v| v.as_object_mut()) {
+        let keys_to_remove: Vec<String> = models
+            .keys()
+            .filter(|k| k.starts_with(&format!("{}/", provider_name)))
+            .cloned()
+            .collect();
+        for key in keys_to_remove {
+            models.remove(&key);
+        }
+    }
+    // Clear primary model if it belongs to this provider
+    if let Some(primary) = config
+        .pointer("/agents/defaults/model/primary")
+        .and_then(|v| v.as_str())
+    {
+        if primary.starts_with(&format!("{}/", provider_name)) {
+            config["agents"]["defaults"]["model"]["primary"] = json!(null);
+        }
+    }
+    Ok(config)
+}
+
+#[command]
+pub async fn preview_delete_provider(provider_name: String) -> Result<StagedPreviewResponse, String> {
+    info!("[删除 Provider Preview] 预览删除 Provider: {}", provider_name);
+    let base = load_openclaw_config_raw()?;
+    let modified = prepare_delete_provider(&base, &provider_name)?;
+    build_staged_preview(&modified)
 }
 
 /// 设置主模型
@@ -1873,6 +2248,30 @@ pub async fn set_primary_model(model_id: String) -> Result<String, String> {
     info!("[设置主模型] ✓ 主模型已设置为: {}", model_id);
 
     Ok(format!("主模型已设置为 {}", model_id))
+}
+
+/// 构建设置主模型后的完整配置（不保存）
+fn prepare_set_primary_model(base_config: &Value, model_id: &str) -> Result<Value, String> {
+    let mut config = base_config.clone();
+    if config.get("agents").is_none() {
+        config["agents"] = json!({});
+    }
+    if config["agents"].get("defaults").is_none() {
+        config["agents"]["defaults"] = json!({});
+    }
+    if config["agents"]["defaults"].get("model").is_none() {
+        config["agents"]["defaults"]["model"] = json!({});
+    }
+    config["agents"]["defaults"]["model"]["primary"] = json!(model_id);
+    Ok(config)
+}
+
+#[command]
+pub async fn preview_set_primary_model(model_id: String) -> Result<StagedPreviewResponse, String> {
+    info!("[设置主模型 Preview] 预览设置主模型: {}", model_id);
+    let base = load_openclaw_config_raw()?;
+    let modified = prepare_set_primary_model(&base, &model_id)?;
+    build_staged_preview(&modified)
 }
 
 /// 添加模型到可用列表
@@ -2338,6 +2737,128 @@ pub async fn save_channel_config(channel: ChannelConfig) -> Result<String, Strin
     }
 }
 
+/// 构建渠道配置修改后的完整配置（不保存，含 bindings 同步）
+/// 注意：test_only_fields 仍会写入 env 文件，因为 env 文件变更独立于配置暂存
+fn prepare_save_channel_config(base_config: &Value, channel: &ChannelConfig) -> Result<Value, String> {
+    let mut config = base_config.clone();
+    let env_path = platform::get_env_file_path();
+
+    // 确保 channels 对象存在
+    if config.get("channels").is_none() {
+        config["channels"] = json!({});
+    }
+
+    // 确保 plugins 对象存在
+    if config.get("plugins").is_none() {
+        config["plugins"] = json!({
+            "allow": [],
+            "entries": {}
+        });
+    }
+    if config["plugins"].get("allow").is_none() {
+        config["plugins"]["allow"] = json!([]);
+    }
+    if config["plugins"].get("entries").is_none() {
+        config["plugins"]["entries"] = json!({});
+    }
+
+    // 这些字段只用于测试，不保存到 openclaw.json，而是保存到 env 文件
+    let test_only_fields = vec!["userId", "testChatId", "testChannelId"];
+
+    // 构建渠道配置
+    let mut channel_obj = json!({
+        "enabled": true
+    });
+
+    // 添加渠道特定配置
+    for (key, value) in &channel.config {
+        if test_only_fields.contains(&key.as_str()) {
+            // 保存到 env 文件（env 文件变更独立于配置暂存）
+            let env_key = format!(
+                "OPENCLAW_{}_{}",
+                channel.id.to_uppercase(),
+                key.to_uppercase()
+            );
+            if let Some(val_str) = value.as_str() {
+                let _ = file::set_env_value(&env_path, &env_key, val_str);
+            }
+        } else {
+            // 保存到 openclaw.json
+            channel_obj[key] = value.clone();
+        }
+    }
+
+    // 保留/写入 accounts 多账号配置
+    if let Some(accounts) = &channel.accounts {
+        let accounts_obj = accounts
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<serde_json::Map<String, Value>>();
+        if !accounts_obj.is_empty() {
+            channel_obj["accounts"] = Value::Object(accounts_obj);
+        }
+    } else if let Some(existing_accounts) = config
+        .pointer(&format!("/channels/{}/accounts", channel.id))
+        .cloned()
+    {
+        channel_obj["accounts"] = existing_accounts;
+    }
+
+    // 更新 channels 配置
+    config["channels"][&channel.id] = channel_obj;
+
+    // 更新 plugins.allow 数组
+    if let Some(allow_arr) = config["plugins"]["allow"].as_array_mut() {
+        allow_arr.retain(|v| v.as_str().map(|s| !s.trim().is_empty()).unwrap_or(true));
+
+        let channel_id_val = json!(&channel.id);
+        if !allow_arr.contains(&channel_id_val) {
+            allow_arr.push(channel_id_val);
+        }
+    }
+
+    // 更新 plugins.entries
+    config["plugins"]["entries"][&channel.id] = json!({
+        "enabled": true
+    });
+
+    // 同步更新 bindings
+    let existing_bindings = config.get("bindings").cloned().unwrap_or(json!([]));
+    let mut all_pairs = parse_account_bindings(&existing_bindings);
+
+    all_pairs.retain(|(binding_channel, _), _| binding_channel != &channel.id);
+
+    if let Some(accounts) = &channel.accounts {
+        for (account_id, account_cfg) in accounts {
+            if let Some(obj) = account_cfg.as_object() {
+                if let Some(agent_id) = obj.get("agentId").and_then(|v| v.as_str()) {
+                    if !agent_id.trim().is_empty() {
+                        all_pairs.insert(
+                            (channel.id.clone(), account_id.clone()),
+                            agent_id.to_string(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    config["bindings"] = merge_bindings_payload_by_shape(&existing_bindings, &all_pairs);
+
+    Ok(config)
+}
+
+#[command]
+pub async fn preview_save_channel_config(channel: ChannelConfig) -> Result<StagedPreviewResponse, String> {
+    info!(
+        "[渠道配置 Preview] 预览渠道配置变更: {} ({})",
+        channel.id, channel.channel_type
+    );
+    let base = load_openclaw_config_raw()?;
+    let modified = prepare_save_channel_config(&base, &channel)?;
+    build_staged_preview(&modified)
+}
+
 /// 清空渠道配置 - 从 openclaw.json 中删除指定渠道的配置
 #[command]
 pub async fn clear_channel_config(channel_id: String) -> Result<String, String> {
@@ -2391,6 +2912,294 @@ pub async fn clear_channel_config(channel_id: String) -> Result<String, String> 
             Err(e)
         }
     }
+}
+
+/// 构建清空渠道配置后的完整配置（不保存，不清理 env 变量）
+fn prepare_clear_channel_config(base_config: &Value, channel_id: &str) -> Result<Value, String> {
+    let mut config = base_config.clone();
+
+    // Remove from channels
+    if let Some(channels) = config.get_mut("channels").and_then(|v| v.as_object_mut()) {
+        channels.remove(channel_id);
+    }
+    // Remove from plugins.allow
+    if let Some(allow_arr) = config.pointer_mut("/plugins/allow").and_then(|v| v.as_array_mut()) {
+        allow_arr.retain(|v| v.as_str() != Some(channel_id));
+    }
+    // Remove from plugins.entries
+    if let Some(entries) = config.pointer_mut("/plugins/entries").and_then(|v| v.as_object_mut()) {
+        entries.remove(channel_id);
+    }
+    // Clear related bindings
+    let existing_bindings = config.get("bindings").cloned().unwrap_or(json!([]));
+    let mut all_pairs = parse_account_bindings(&existing_bindings);
+    all_pairs.retain(|(binding_channel, _), _| binding_channel != channel_id);
+    config["bindings"] = merge_bindings_payload_by_shape(&existing_bindings, &all_pairs);
+
+    Ok(config)
+}
+
+#[command]
+pub async fn preview_clear_channel_config(channel_id: String) -> Result<StagedPreviewResponse, String> {
+    info!("[清空渠道 Preview] 预览清空渠道配置: {}", channel_id);
+    let base = load_openclaw_config_raw()?;
+    let modified = prepare_clear_channel_config(&base, &channel_id)?;
+    build_staged_preview(&modified)
+}
+
+// ============ Staging 应用 / 丢弃 ============
+
+/// 应用暂存配置（含备份）
+#[command]
+pub async fn apply_staged_config(staging_id: String) -> Result<ApplyConfigResponse, String> {
+    info!("[应用暂存配置] staging_id={}", staging_id);
+
+    let staged_config = read_staged_config(&staging_id)?;
+
+    let validation = validate_preview_input(&staged_config);
+    if !validation.valid {
+        delete_staged_config(&staging_id)?;
+        return Err(format!(
+            "暂存配置校验失败: {}",
+            validation
+                .issues
+                .iter()
+                .map(|issue| format!("{}: {}", issue.path, issue.message))
+                .collect::<Vec<String>>()
+                .join("；")
+        ));
+    }
+
+    let mut next_config = normalize_and_validate_config(&staged_config)?;
+    let existing_config = load_openclaw_config_raw()?;
+    merge_gateway_critical_fields(&mut next_config, &existing_config);
+
+    let backup_path = write_backup_snapshot(&existing_config)?;
+    save_openclaw_config(&next_config)?;
+
+    // Clean up staging file
+    delete_staged_config(&staging_id)?;
+
+    info!("[应用暂存配置] ✓ 配置已应用，备份: {}", backup_path);
+    Ok(ApplyConfigResponse {
+        backup_path,
+        applied_at: format_now_rfc3339(),
+    })
+}
+
+/// 丢弃暂存配置
+#[command]
+pub async fn discard_staged_config(staging_id: String) -> Result<String, String> {
+    info!("[丢弃暂存配置] staging_id={}", staging_id);
+    delete_staged_config(&staging_id)?;
+    Ok("暂存配置已丢弃".to_string())
+}
+
+// ============ Staging Session 命令 ============
+
+/// 查询当前 staging session 状态
+#[command]
+pub async fn staging_session_status() -> Result<StagingSessionStatus, String> {
+    info!("[Staging Session] 查询 session 状态");
+    match read_session_meta()? {
+        Some(meta) => Ok(StagingSessionStatus {
+            active: true,
+            session_id: Some(meta.session_id),
+            change_count: meta.change_count,
+            change_labels: meta.change_labels,
+            created_at: Some(meta.created_at),
+            updated_at: Some(meta.updated_at),
+        }),
+        None => Ok(StagingSessionStatus {
+            active: false,
+            session_id: None,
+            change_count: 0,
+            change_labels: vec![],
+            created_at: None,
+            updated_at: None,
+        }),
+    }
+}
+
+/// 将一次操作应用到 staging session
+#[command]
+pub async fn staging_session_apply_change(request: StagingChangeRequest) -> Result<StagingChangeResult, String> {
+    info!("[Staging Session] 应用变更: {} ({})", request.label, request.operation);
+
+    // 1. 读取基础配置：session 存在则用 session，否则从磁盘读
+    let base_config = match read_session_config()? {
+        Some(config) => config,
+        None => load_openclaw_config_raw()?,
+    };
+
+    // 2. 记录变更前的配置用于计算 instant diff
+    let before_config = base_config.clone();
+
+    // 3. 根据 operation 分发到对应的 prepare_xxx
+    let modified_config = match request.operation.as_str() {
+        "save_agents_list" => {
+            let agents_list = request.args.get("agentsList")
+                .or_else(|| request.args.get("agents_list"))
+                .cloned()
+                .ok_or_else(|| "缺少参数: agentsList".to_string())?;
+            prepare_save_agents_list(&base_config, agents_list)?
+        }
+        "save_provider" => {
+            let provider_name = request.args.get("providerName")
+                .or_else(|| request.args.get("provider_name"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "缺少参数: providerName".to_string())?;
+            let base_url = request.args.get("baseUrl")
+                .or_else(|| request.args.get("base_url"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "缺少参数: baseUrl".to_string())?;
+            let api_key = request.args.get("apiKey")
+                .or_else(|| request.args.get("api_key"))
+                .and_then(|v| v.as_str());
+            let api_type = request.args.get("apiType")
+                .or_else(|| request.args.get("api_type"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "缺少参数: apiType".to_string())?;
+            let models: Vec<ModelConfig> = request.args.get("models")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("models 参数无效: {}", e))?
+                .unwrap_or_default();
+            prepare_save_provider(&base_config, provider_name, base_url, api_key, api_type, &models)?
+        }
+        "delete_provider" => {
+            let provider_name = request.args.get("providerName")
+                .or_else(|| request.args.get("provider_name"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "缺少参数: providerName".to_string())?;
+            prepare_delete_provider(&base_config, provider_name)?
+        }
+        "set_primary_model" => {
+            let model_id = request.args.get("modelId")
+                .or_else(|| request.args.get("model_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "缺少参数: modelId".to_string())?;
+            prepare_set_primary_model(&base_config, model_id)?
+        }
+        "save_channel_config" => {
+            let channel: ChannelConfig = request.args.get("channel")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("channel 参数无效: {}", e))?
+                .ok_or_else(|| "缺少参数: channel".to_string())?;
+            prepare_save_channel_config(&base_config, &channel)?
+        }
+        "clear_channel_config" => {
+            let channel_id = request.args.get("channelId")
+                .or_else(|| request.args.get("channel_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "缺少参数: channelId".to_string())?;
+            prepare_clear_channel_config(&base_config, channel_id)?
+        }
+        "replace_full_config" => {
+            let config = request.args.get("config")
+                .cloned()
+                .ok_or_else(|| "缺少参数: config".to_string())?;
+            config
+        }
+        _ => return Err(format!("未知的 staging 操作: {}", request.operation)),
+    };
+
+    // 4. 更新 session 文件
+    write_session_config(&modified_config)?;
+
+    // 5. 更新 session meta
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut meta = read_session_meta()?.unwrap_or_else(|| StagingSessionMeta {
+        session_id: generate_session_id(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        change_count: 0,
+        change_labels: vec![],
+    });
+    meta.updated_at = now;
+    meta.change_count += 1;
+    meta.change_labels.push(request.label.clone());
+    write_session_meta(&meta)?;
+
+    // 6. 计算本次操作的 instant diff
+    let instant_diff = build_config_diff_summary(&before_config, &modified_config);
+    let has_changes = instant_diff.added > 0 || instant_diff.modified > 0 || instant_diff.removed > 0;
+
+    info!("[Staging Session] ✓ 变更已写入 session ({}), 累计 {} 项",
+        meta.session_id, meta.change_count);
+
+    Ok(StagingChangeResult {
+        session_id: meta.session_id,
+        change_count: meta.change_count,
+        change_labels: meta.change_labels,
+        instant_diff_summary: if has_changes { Some(instant_diff) } else { None },
+    })
+}
+
+/// 生成 session 最终预览（session config vs 磁盘 config）
+#[command]
+pub async fn staging_session_preview() -> Result<StagedPreviewResponse, String> {
+    info!("[Staging Session] 生成最终预览");
+    let session_config = read_session_config()?
+        .ok_or_else(|| "没有活跃的 staging session".to_string())?;
+    build_staged_preview(&session_config)
+}
+
+/// 应用 staging session 并清理
+#[command]
+pub async fn staging_session_apply() -> Result<ApplyConfigResponse, String> {
+    info!("[Staging Session] 应用 session");
+
+    let session_config = read_session_config()?
+        .ok_or_else(|| "没有活跃的 staging session".to_string())?;
+
+    // 验证
+    let validation = validate_preview_input(&session_config);
+    if !validation.valid {
+        return Err(format!(
+            "Session 配置校验失败: {}",
+            validation.issues.iter()
+                .map(|issue| format!("{}: {}", issue.path, issue.message))
+                .collect::<Vec<String>>()
+                .join("；")
+        ));
+    }
+
+    // 标准化 + 合并网关字段
+    let mut next_config = normalize_and_validate_config(&session_config)?;
+    let existing_config = load_openclaw_config_raw()?;
+    merge_gateway_critical_fields(&mut next_config, &existing_config);
+
+    // 备份 + 保存
+    let backup_path = write_backup_snapshot(&existing_config)?;
+    save_openclaw_config(&next_config)?;
+
+    // 清理 session 文件
+    delete_session_files()?;
+
+    info!("[Staging Session] ✓ Session 已应用，备份: {}", backup_path);
+    Ok(ApplyConfigResponse {
+        backup_path,
+        applied_at: format_now_rfc3339(),
+    })
+}
+
+/// 丢弃 staging session
+#[command]
+pub async fn staging_session_discard() -> Result<String, String> {
+    info!("[Staging Session] 丢弃 session");
+    delete_session_files()?;
+    Ok("Staging session 已丢弃".to_string())
+}
+
+/// 读取 staging session 中的配置
+#[command]
+pub async fn staging_session_get_config() -> Result<Option<Value>, String> {
+    info!("[Staging Session] 读取 session 配置");
+    read_session_config()
 }
 
 // ============ 飞书插件管理 ============

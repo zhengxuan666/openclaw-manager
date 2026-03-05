@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { invokeCommand as invoke } from "../../lib/invoke";
+import { useStagingSession } from "../../contexts/StagingSessionContext";
 import {
   MessageCircle,
   Hash,
@@ -507,51 +508,7 @@ function parseBindings(rawBindings: unknown): Record<string, string> {
   return map;
 }
 
-function buildBindingsPayload(
-  originalBindings: unknown,
-  allBindingsMap: Record<string, string>
-): BindingsPayload {
-  const grouped: Record<string, Record<string, string>> = {};
-  Object.entries(allBindingsMap).forEach(([key, agentId]) => {
-    const parsed = splitBindingKey(key);
-    if (!parsed) return;
-    if (!grouped[parsed.channel]) {
-      grouped[parsed.channel] = {};
-    }
-    grouped[parsed.channel][parsed.accountId] = agentId;
-  });
-
-  if (
-    Array.isArray(originalBindings) ||
-    !isRecord(originalBindings) ||
-    Object.keys(originalBindings).length === 0
-  ) {
-    return Object.entries(grouped).flatMap(([channel, accounts]) =>
-      Object.entries(accounts).map(([accountId, agentId]) => ({
-        agentId,
-        match: {
-          channel,
-          accountId,
-        },
-      }))
-    );
-  }
-
-  const values = Object.values(originalBindings);
-  const isFlatObject = values.every((v) => typeof v === "string");
-
-  if (isFlatObject) {
-    const flat: Record<string, string> = {};
-    Object.entries(grouped).forEach(([channel, accounts]) => {
-      Object.entries(accounts).forEach(([accountId, agentId]) => {
-        flat[`${channel}/${accountId}`] = agentId;
-      });
-    });
-    return flat;
-  }
-
-  return grouped;
-}
+// buildBindingsPayload removed — bindings sync is now handled by Rust backend
 
 export function Channels() {
   const [channels, setChannels] = useState<ChannelConfig[]>([]);
@@ -584,7 +541,7 @@ export function Channels() {
   const [newAccountId, setNewAccountId] = useState("");
 
   const [availableAgents, setAvailableAgents] = useState<string[]>([]);
-  const [bindingsRaw, setBindingsRaw] = useState<BindingsPayload>([]);
+  const [_bindingsRaw, setBindingsRaw] = useState<BindingsPayload>([]);
   const [allBindingsMap, setAllBindingsMap] = useState<Record<string, string>>(
     {}
   );
@@ -600,6 +557,8 @@ export function Channels() {
     new Set()
   );
   const [mobileChannelListOpen, setMobileChannelListOpen] = useState(false);
+
+  const { applyChange } = useStagingSession();
 
   const togglePasswordVisibility = (fieldKey: string) => {
     setVisiblePasswords((prev) => {
@@ -844,23 +803,11 @@ export function Channels() {
     setShowClearConfirm(false);
     setClearing(true);
     try {
-      await invoke("clear_channel_config", { channelId: selectedChannel });
-
-      const nextBindingsMap = { ...allBindingsMap };
-      Object.keys(nextBindingsMap).forEach((key) => {
-        const parsed = splitBindingKey(key);
-        if (parsed?.channel === selectedChannel) {
-          delete nextBindingsMap[key];
-        }
-      });
-      const nextBindingsPayload = buildBindingsPayload(
-        bindingsRaw,
-        nextBindingsMap
+      await applyChange(
+        "clear_channel_config",
+        { channelId: selectedChannel },
+        `清空渠道: ${channelName}`
       );
-      await invoke("save_bindings", { bindings: nextBindingsPayload });
-
-      setBindingsRaw(nextBindingsPayload);
-      setAllBindingsMap(nextBindingsMap);
 
       const { channelList, bindingMap } = await fetchAllData();
       if (channelList.length > 0) {
@@ -870,16 +817,15 @@ export function Channels() {
       } else {
         setSelectedChannel(null);
       }
-
       setTestResult({
         success: true,
-        message: `${channelName} 配置已清空`,
+        message: `${channelName} 配置已写入 Session`,
         error: null,
       });
     } catch (e) {
       setTestResult({
         success: false,
-        message: "清空失败",
+        message: "保存失败",
         error: String(e),
       });
     } finally {
@@ -978,45 +924,32 @@ export function Channels() {
         accountConfigPayload[accountId] = configFromForm(form);
       });
 
-      await invoke("save_channel_config", {
-        channel: {
-          ...channel,
-          config,
-          accounts: accountConfigPayload,
-        },
-      });
-
-      const nextBindingsMap = { ...allBindingsMap };
-      Object.keys(nextBindingsMap).forEach((key) => {
-        const parsed = splitBindingKey(key);
-        if (parsed?.channel === selectedChannel) {
-          delete nextBindingsMap[key];
-        }
-      });
-
+      // Include agentId in account configs so Rust can sync bindings
       Object.entries(accountBindings).forEach(([accountId, agentId]) => {
         const trimmedAgentId = agentId.trim();
         if (!trimmedAgentId) return;
-        if (!accountForms[accountId]) return;
-        nextBindingsMap[buildBindingKey(selectedChannel, accountId)] =
-          trimmedAgentId;
+        if (!accountConfigPayload[accountId]) {
+          accountConfigPayload[accountId] = {};
+        }
+        accountConfigPayload[accountId].agentId = trimmedAgentId;
       });
 
-      const nextBindingsPayload = buildBindingsPayload(
-        bindingsRaw,
-        nextBindingsMap
+      await applyChange(
+        "save_channel_config",
+        {
+          channel: {
+            ...channel,
+            config,
+            accounts: accountConfigPayload,
+          },
+        },
+        `保存渠道: ${
+          channelInfo[channel.channel_type]?.name || channel.channel_type
+        }`
       );
-      await invoke("save_bindings", {
-        bindings: nextBindingsPayload,
-      });
-
-      setBindingsRaw(nextBindingsPayload);
-      setAllBindingsMap(nextBindingsMap);
 
       const { channelList, bindingMap } = await fetchAllData();
       hydrateChannelEditor(selectedChannel, channelList, bindingMap);
-
-      alert("渠道配置与账号绑定已保存！");
     } catch (e) {
       console.error("保存失败:", e);
       alert("保存失败: " + e);

@@ -56,11 +56,13 @@ openclaw-manager/
 │   ├── components/
 │   │   ├── Layout/            # 布局组件（侧边栏、头部等）
 │   │   ├── Dashboard/         # 仪表盘
-│   │   ├── AIConfig/          # AI 配置
+│   │   ├── AgentCenter/       # Agent 管理中心
+│   │   ├── AIConfig/          # AI 配置（Provider / Model）
 │   │   ├── Channels/          # 消息渠道配置
 │   │   ├── Service/           # 服务管理
 │   │   ├── Testing/           # 测试诊断
-│   │   └── Settings/          # 应用设置
+│   │   ├── Settings/          # 应用设置
+│   │   └── shared/            # 共享组件（ConfigChangePreviewDialog 等）
 │   └── styles/
 │       └── globals.css        # 全局样式
 │
@@ -125,17 +127,17 @@ bash scripts/1panel_web_start.sh
 
 ### 可用脚本
 
-| 脚本 | 命令 | 说明 |
-|------|------|------|
-| `dev` | `vite` | 启动前端开发服务器 |
-| `build` | `tsc && vite build` | 构建前端（类型检查 + 打包） |
-| `preview` | `vite preview` | 本地预览生产构建 |
-| `tauri:dev` | `tauri dev` | Tauri 开发模式运行（含热重载） |
-| `tauri:build` | `tauri build` | 构建跨平台桌面应用 |
-| `web:backend` | `cargo run --bin web-server` | 运行 Rust Web 服务器后端 |
-| `web:frontend` | `vite` | 运行前端开发服务器 |
-| `web:build` | `npm run build && cargo build --release --bin web-server` | 构建前端 + Rust Web 服务器 |
-| `web:serve` | 构建并启动完整 Web 应用 | 全流程构建与服务启动 |
+| 脚本           | 命令                                                      | 说明                           |
+| -------------- | --------------------------------------------------------- | ------------------------------ |
+| `dev`          | `vite`                                                    | 启动前端开发服务器             |
+| `build`        | `tsc && vite build`                                       | 构建前端（类型检查 + 打包）    |
+| `preview`      | `vite preview`                                            | 本地预览生产构建               |
+| `tauri:dev`    | `tauri dev`                                               | Tauri 开发模式运行（含热重载） |
+| `tauri:build`  | `tauri build`                                             | 构建跨平台桌面应用             |
+| `web:backend`  | `cargo run --bin web-server`                              | 运行 Rust Web 服务器后端       |
+| `web:frontend` | `vite`                                                    | 运行前端开发服务器             |
+| `web:build`    | `npm run build && cargo build --release --bin web-server` | 构建前端 + Rust Web 服务器     |
+| `web:serve`    | 构建并启动完整 Web 应用                                   | 全流程构建与服务启动           |
 
 ### 开发流程
 
@@ -156,19 +158,37 @@ bash scripts/1panel_web_start.sh
 
 ## 架构
 
-本项目采用混合架构：
+本项目采用混合架构，支持 **Tauri 桌面模式** 和 **Web 部署模式** 两种运行方式。
+
+> ⚠️ **重要：当前主要开发和使用场景为 Web 模式。** 所有功能变更必须确保 Web 模式可用。
 
 - **前端层**：基于 React 18 的单页应用，使用 TailwindCSS 样式化，Zustand 管理状态，Framer Motion 实现动画。通过 Tauri Commands 与后端通信。
 - **后端层**：Rust 应用，由 Tauri 框架管理，负责系统级操作（文件系统访问、进程管理、Shell 命令执行）。同时提供独立的 Web 服务器二进制（`web-server`），支持 Web 部署模式。
-- **通信方式**：前端通过 `@tauri-apps/api` 调用 Rust 端注册的 Tauri Commands；Web 模式下通过 HTTP API（`/api` 路径代理）通信。
+- **通信方式**：
+  - **Tauri 桌面模式**：前端通过 `@tauri-apps/api` 调用 Rust 端注册的 Tauri Commands（`main.rs` → `tauri::generate_handler![]`）
+  - **Web 模式**：前端通过 HTTP API（`/api/invoke`）通信，由 `web_server.rs` → `dispatch_command()` 分发到相同的 Rust 后端函数
+
+### 双入口命令分发（⚠️ 开发关键）
+
+**Tauri 模式和 Web 模式有两套独立的命令注册/分发机制：**
+
+| 模式       | 入口文件                      | 注册方式                        | 调用方式                            |
+| ---------- | ----------------------------- | ------------------------------- | ----------------------------------- |
+| Tauri 桌面 | `src-tauri/src/main.rs`       | `tauri::generate_handler![...]` | `tauriInvoke(cmd, args)`            |
+| Web 部署   | `src-tauri/src/web_server.rs` | `dispatch_command()` match 分支 | `fetch('/api/invoke', {cmd, args})` |
+
+**前端通过 `src/lib/invoke.ts` 的 `invokeCommand()` 自动选择调用方式**（检测 `__TAURI_INTERNALS__` 环境变量）。
+
+> ⚠️ **新增 Rust 命令时，必须同时在 `main.rs` 和 `web_server.rs` 中注册！** 只在 `main.rs` 注册会导致 Web 模式报 "未知命令" 错误。这是最常见的遗漏。
 
 ### 构建产物
 
-| 平台 | 格式 |
-|------|------|
-| macOS | `.dmg`, `.app` |
-| Windows | `.msi`, `.exe` |
-| Linux | `.deb`, `.AppImage` |
+| 模式     | 构建命令              | 产物                                    |
+| -------- | --------------------- | --------------------------------------- |
+| Web 部署 | `npm run web:build`   | 前端 `dist/` + Rust `web-server` 二进制 |
+| macOS    | `npm run tauri:build` | `.dmg`, `.app`                          |
+| Windows  | `npm run tauri:build` | `.msi`, `.exe`                          |
+| Linux    | `npm run tauri:build` | `.deb`, `.AppImage`                     |
 
 ## 贡献指南
 
